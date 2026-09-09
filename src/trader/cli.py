@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from trader import logging_setup
-from trader.agent import StubAgent
+from trader.agent import Agent, StubAgent
 from trader.broker import AlpacaBroker, Broker
 from trader.config import MissingCredential, Settings, load_settings
 from trader.constants import ALPACA_PAPER_BASE_URL
@@ -25,6 +25,8 @@ from trader.db import (
     set_flag,
     utcnow,
 )
+from trader.llm import AnthropicAgent
+from trader.prompts import PromptError
 from trader.risk.checks import CHECK_NAMES
 from trader.risk.config import (
     DEFAULT_RISK_CONFIG_PATH,
@@ -42,6 +44,23 @@ def _open(settings: Settings) -> tuple[sqlite3.Connection, Broker]:
     return conn, broker
 
 
+def _agent(
+    settings: Settings, args: argparse.Namespace, conn: sqlite3.Connection,
+    broker: Broker, config: RiskConfig
+) -> Agent:
+    """The Phase 1 stub, or the real model. Both satisfy the same protocol."""
+    if args.stub:
+        return StubAgent()
+    return AnthropicAgent(
+        conn,
+        broker,
+        config,
+        api_key=settings.anthropic_api_key,
+        thinking=not args.no_thinking,
+        effort=args.effort,
+    )
+
+
 def _risk(args: argparse.Namespace) -> RiskConfig:
     """Load risk.toml. A bad config must stop the process, never be defaulted."""
     return load_risk_config(Path(args.risk_config))
@@ -53,7 +72,7 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     run_scheduler(
         conn,
         broker,
-        StubAgent(),
+        _agent(settings, args, conn, broker, config),
         cycle_minutes=settings.cycle_minutes,
         risk_config=config,
     )
@@ -61,10 +80,28 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def cmd_cycle(settings: Settings, args: argparse.Namespace) -> int:
+    config = _risk(args)
     conn, broker = _open(settings)
     reconcile_orphan_cycles(conn)
-    outcome = run_cycle(conn, broker, StubAgent(), risk_config=_risk(args), force=args.force)
-    print(json.dumps({"cycle_id": outcome.cycle_id, "status": outcome.status}, indent=2))
+    outcome = run_cycle(
+        conn, broker, _agent(settings, args, conn, broker, config),
+        risk_config=config, force=args.force
+    )
+    summary: dict[str, Any] = {
+        "cycle_id": outcome.cycle_id,
+        "status": outcome.status,
+        "action": outcome.result.action if outcome.result else None,
+        "prompt_tokens": outcome.result.prompt_tokens if outcome.result else None,
+        "tool_calls": [t["name"] for t in outcome.result.tool_calls] if outcome.result else [],
+        "error": outcome.error,
+    }
+    if outcome.execution is not None:
+        summary["order"] = {
+            "approved": outcome.execution.verdict.approved,
+            "executed": outcome.execution.executed,
+            "failed_checks": [f.check for f in outcome.execution.verdict.failures],
+        }
+    print(json.dumps(summary, indent=2))
     return 0 if outcome.status != "error" else 1
 
 
@@ -198,6 +235,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trader", description=__doc__)
     p.add_argument("--text-logs", action="store_true", help="human-readable logs, not JSON lines")
     p.add_argument(
+        "--stub", action="store_true", help="use the Phase 1 stub agent instead of the model"
+    )
+    p.add_argument(
+        "--no-thinking", action="store_true", help="disable adaptive thinking on the model"
+    )
+    p.add_argument(
+        "--effort",
+        default="medium",
+        choices=["low", "medium", "high", "max"],
+        help="model effort level (default: medium)",
+    )
+    p.add_argument(
         "--risk-config",
         default=str(DEFAULT_RISK_CONFIG_PATH),
         help=f"path to the risk limits file (default: {DEFAULT_RISK_CONFIG_PATH})",
@@ -255,6 +304,14 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(settings, args))
     except RiskConfigError as exc:
         # A malformed risk file must stop the process, not start it unprotected.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except MissingCredential as exc:
+        # The Anthropic key is read lazily, so it surfaces here rather than at
+        # load_settings. --stub needs no key at all.
+        print(f"error: {exc}\nUse --stub to run the loop without the model.", file=sys.stderr)
+        return 2
+    except PromptError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

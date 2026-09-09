@@ -130,6 +130,12 @@ def run_cycle(
         log.error("agent_error", extra={"cycle_id": cycle_id}, exc_info=True)
         return finish(STATUS_ERROR, error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
 
+    if result.executions:
+        # The agent already routed its proposal through execution.place_order
+        # (the tool loop needs the risk verdict as a tool result). Everything is
+        # already recorded in decisions and risk_events; do not re-run it.
+        return finish(STATUS_OK, result=result, execution=result.executions[-1])
+
     if result.action not in ("buy", "sell"):
         # A cycle that chose to do nothing is still a decision worth querying.
         record_decision(

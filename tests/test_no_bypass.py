@@ -89,3 +89,63 @@ def test_only_broker_imports_the_alpaca_sdk() -> None:
             if module and module.split(".")[0] == "alpaca":
                 offenders.append(f"{path.relative_to(SRC)}: {module}")
     assert not offenders, f"alpaca SDK imported outside broker.py: {offenders}"
+
+
+# --- Phase 3: exactly one write tool ---------------------------------------
+
+
+def test_only_one_tool_calls_place_order() -> None:
+    """SPEC.md constraint #2: the model has exactly one tool that writes."""
+    callers = _calls_named(SRC / "tools.py", "place_order")
+    assert callers == ["tools.py::_place_order"], callers
+
+
+def test_no_read_tool_contains_a_write_statement() -> None:
+    """Read tools must not reach the DB with INSERT/UPDATE/DELETE."""
+    import inspect
+
+    from trader import tools
+
+    offenders = []
+    for name, impl in tools.TOOL_IMPLS.items():
+        if name == tools.WRITE_TOOL:
+            continue
+        source = inspect.getsource(impl).upper()
+        for verb in ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "REPLACE "):
+            if verb in source:
+                offenders.append(f"{name}: {verb.strip()}")
+    assert not offenders, offenders
+
+
+def test_the_tool_surface_is_exactly_what_is_declared() -> None:
+    """No tool may exist without a schema, or a schema without an implementation."""
+    from trader import tools
+
+    assert {t["name"] for t in tools.TOOL_SCHEMAS} == set(tools.TOOL_IMPLS)
+    write_tools = [t for t in tools.TOOL_SCHEMAS if t["name"] == tools.WRITE_TOOL]
+    assert len(write_tools) == 1
+
+
+def test_no_tool_can_run_a_shell_or_arbitrary_http() -> None:
+    """SPEC.md constraint #2: no shell access, no arbitrary HTTP."""
+    import ast
+
+    forbidden = {"subprocess", "os.system", "requests", "httpx", "urllib", "socket", "pty"}
+    tree = ast.parse((SRC / "tools.py").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert not (imported & forbidden), imported & forbidden
+    assert "eval(" not in (SRC / "tools.py").read_text()
+
+
+def test_the_agent_cannot_change_its_own_risk_config() -> None:
+    """RiskConfig is frozen, and nothing in the tool layer rebinds it."""
+    import re
+
+    source = (SRC / "tools.py").read_text()
+    assert not re.search(r"\btc\.config\s*=", source)
+    assert not re.search(r"\bconfig\.\w+\s*=", source)

@@ -90,3 +90,80 @@ def position(
 def make_clock(is_open: bool, now: datetime | None = None) -> Clock:
     now = now or utcnow()
     return Clock(now, is_open, now + timedelta(hours=1), now + timedelta(hours=6))
+
+
+# --- Anthropic client double ------------------------------------------------
+
+
+@dataclass
+class FakeBlock:
+    type: str
+    text: str = ""
+    name: str = ""
+    id: str = ""
+    input: dict[str, Any] = field(default_factory=dict)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"type": self.type, "text": self.text, "name": self.name, "input": self.input}
+
+
+@dataclass
+class FakeUsage:
+    input_tokens: int = 100
+    output_tokens: int = 50
+
+
+@dataclass
+class FakeResponse:
+    content: list[FakeBlock]
+    stop_reason: str = "end_turn"
+    usage: FakeUsage = field(default_factory=FakeUsage)
+    stop_details: Any = None
+
+
+def text_response(text: str) -> FakeResponse:
+    return FakeResponse(content=[FakeBlock("text", text=text)], stop_reason="end_turn")
+
+
+def tool_response(*calls: tuple[str, dict[str, Any]], text: str = "") -> FakeResponse:
+    blocks = [FakeBlock("text", text=text)] if text else []
+    blocks += [
+        FakeBlock("tool_use", name=name, id=f"toolu_{i}", input=args)
+        for i, (name, args) in enumerate(calls)
+    ]
+    return FakeResponse(content=blocks, stop_reason="tool_use")
+
+
+@dataclass
+class FakeCount:
+    input_tokens: int
+
+
+class FakeMessages:
+    def __init__(self, owner: FakeAnthropic) -> None:
+        self._owner = owner
+
+    def count_tokens(self, **kwargs: Any) -> FakeCount:
+        self._owner.count_calls.append(kwargs)
+        return FakeCount(self._owner.token_counts.pop(0) if self._owner.token_counts else 500)
+
+    def create(self, **kwargs: Any) -> FakeResponse:
+        self._owner.requests.append(kwargs)
+        if not self._owner.responses:
+            raise AssertionError("FakeAnthropic ran out of scripted responses")
+        return self._owner.responses.pop(0)
+
+
+class FakeAnthropic:
+    """Returns scripted responses in order; records every request it was sent."""
+
+    def __init__(
+        self,
+        responses: list[FakeResponse] | None = None,
+        token_counts: list[int] | None = None,
+    ) -> None:
+        self.responses = list(responses or [])
+        self.token_counts = list(token_counts or [])
+        self.requests: list[dict[str, Any]] = []
+        self.count_calls: list[dict[str, Any]] = []
+        self.messages = FakeMessages(self)

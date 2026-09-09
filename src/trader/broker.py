@@ -9,17 +9,31 @@ new caller fails the build.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockLatestTradeRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 from trader.constants import ALPACA_PAPER_BASE_URL
 from trader.db import iso, utcnow
+
+#: Bar granularities the agent may request. Deliberately coarse — this is a
+#: read-only data tool, not a place to encode a strategy.
+BAR_TIMEFRAMES = {
+    "1Min": (TimeFrame(1, TimeFrameUnit.Minute), timedelta(minutes=1)),
+    "5Min": (TimeFrame(5, TimeFrameUnit.Minute), timedelta(minutes=5)),
+    "15Min": (TimeFrame(15, TimeFrameUnit.Minute), timedelta(minutes=15)),
+    "1Hour": (TimeFrame(1, TimeFrameUnit.Hour), timedelta(hours=1)),
+    "1Day": (TimeFrame(1, TimeFrameUnit.Day), timedelta(days=1)),
+}
+
+#: Hard cap, because bars land in the prompt and the prompt has a token budget.
+MAX_BARS = 30
 
 
 class BrokerError(RuntimeError):
@@ -49,6 +63,7 @@ class Broker(Protocol):
     def get_account(self) -> dict[str, Any]: ...
     def get_positions(self) -> list[dict[str, Any]]: ...
     def get_latest_price(self, symbol: str) -> float: ...
+    def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]: ...
     def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt: ...
 
 
@@ -149,6 +164,39 @@ class AlpacaBroker:
         if price <= 0:
             raise BrokerError(f"non-positive last price for {symbol}: {price}")
         return price
+
+    def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]:
+        """Recent OHLCV bars. Read-only market data, no strategy attached."""
+        spec = BAR_TIMEFRAMES.get(timeframe)
+        if spec is None:
+            raise BrokerError(
+                f"unsupported timeframe {timeframe!r}; "
+                f"expected one of {', '.join(sorted(BAR_TIMEFRAMES))}"
+            )
+        unit, span = spec
+        limit = max(1, min(int(limit), MAX_BARS))
+        # Two gotchas, both load-bearing. Without an explicit `start` Alpaca
+        # returns only the newest bar; and its `limit` takes the *oldest* N in
+        # the window, not the newest. So: reach back generously (x4, to absorb
+        # weekends and holidays), ask for the whole window, and trim to the
+        # newest `limit` ourselves.
+        start = datetime.now(UTC) - span * limit * 4
+        try:
+            request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=unit, start=start)
+            bars = self._data.get_stock_bars(request)
+        except Exception as exc:
+            raise BrokerError(f"get_bars({symbol}, {timeframe}) failed: {exc}") from exc
+        return [
+            {
+                "t": bar.timestamp.isoformat(),
+                "o": float(bar.open),
+                "h": float(bar.high),
+                "l": float(bar.low),
+                "c": float(bar.close),
+                "v": float(bar.volume),
+            }
+            for bar in bars.data.get(symbol, [])[-limit:]
+        ]
 
     def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt:
         """The only mutating broker call in the repo.

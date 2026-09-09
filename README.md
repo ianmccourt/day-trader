@@ -6,7 +6,7 @@ there is no config flag, env var, or argument in this repo that can change it.
 `tests/test_paper_only.py` fails the build if a live endpoint appears anywhere
 in `src/`.
 
-Built in the phases laid out in `spec.MD`. **Phases 1 and 2 are complete.**
+Built in the phases laid out in `spec.MD`. **Phases 1-3 are complete.**
 
 ## Setup
 
@@ -20,6 +20,7 @@ cp .env.example .env    # then fill in your Alpaca *paper* keys
 ```bash
 uv run trader run                  # start the scheduled loop (blocking)
 uv run trader cycle [--force]      # run one cycle now; --force ignores market-closed
+uv run trader cycle --stub         # run a cycle with the Phase 1 stub, no model call
 uv run trader status               # today's session, reconstructed from the DB
 uv run trader cycles --limit 25    # recent cycles, one line each
 uv run trader show <cycle_id>      # full prompt + response for one cycle
@@ -31,6 +32,9 @@ uv run trader --text-logs ...      # human-readable logs instead of JSON lines
 
 `status`, `cycles`, `show`, `rejections` and `kill` read only the DB and work
 without any Alpaca credentials.
+
+`--stub` runs the Phase 1 stub agent instead of the model (no Anthropic key
+needed). `--effort low|medium|high|max` and `--no-thinking` tune the model call.
 
 Risk limits live in [`risk.toml`](risk.toml) (stdlib `tomllib`, no YAML
 dependency). Loading is strict — an unknown or misspelled key is a fatal error,
@@ -131,9 +135,73 @@ Three more properties worth knowing:
 | `max_daily_loss` | **Latches.** The first breach writes a `daily_loss_halt:<day>` flag; an intraday recovery does not re-enable trading. Fails closed if the prior close is unknown. |
 | `max_orders_per_hour` / `max_orders_per_day` | Counted from our own `decisions` rows — the broker has no idea which of its orders came from this harness. An approved order the broker then rejects gets no order id, so it does not consume budget. |
 
-`uv run pytest` — 132 tests. 46 are per-check units (a passing, failing and
-boundary case each), 22 are the adversarial battery run through the real
-execution path against a real SQLite file.
+`uv run pytest` — 46 per-check units (a passing, failing and boundary case
+each), and 22 adversarial cases run through the real execution path against a
+real SQLite file.
+
+
+## Phase 3 — the agent
+
+`claude-sonnet-4-6` via the `anthropic` SDK, in a **manual** tool loop —
+not the SDK's tool runner. The loop has to interpose the risk layer between the
+model's proposal and the broker and hand the verdict back as a tool result, and
+spec.MD asks to own every failure mode.
+
+Prompt text lives in [`prompts/`](prompts) as plain `.txt` files; a test fails
+the build if prompt text appears inline in `src/`. The system prompt is a
+**placeholder** — it states what the agent is, what it can call, and what will
+stop it, and contains no strategy. A test asserts no strategy hints leaked in.
+
+### The tool surface
+
+Read tools first, then the single write tool — in that order in the tool list,
+which is also fixed across cycles so the tool block stays cacheable.
+
+| Tool | |
+| --- | --- |
+| `get_risk_limits` | the limits, the checks that will run, rate budget used |
+| `get_quote` | latest trade price, up to 5 symbols |
+| `get_bars` | recent OHLCV, capped at 30 bars |
+| `get_theses` | stored theses in full (the rendered state truncates) |
+| `get_recent_decisions` | decision history beyond the rendered window |
+| **`place_order`** | **the only tool that writes anything** |
+
+`place_order` calls `execution.place_order` — the same single gated path from
+Phase 2. Enforced structurally: `tests/test_no_bypass.py` fails the build if a
+second tool calls it, if any read tool contains an `INSERT`/`UPDATE`/`DELETE`,
+if `tools.py` imports `subprocess`/`requests`/`httpx`/`socket`, or if anything
+rebinds the risk config.
+
+At most one order per cycle. A second call — including a second `place_order`
+block in the *same* assistant turn — comes back as an error result, not an
+order.
+
+### The context budget
+
+`MAX_PROMPT_TOKENS = 10_000`, asserted before **every** request in the loop, not
+just the first — tool results accumulate, so the last iteration is the one that
+would blow it. Counted through the API's own `count_tokens` with the real
+system, messages, and tools; a local estimate that drifts from the server's
+count would make the assertion meaningless. Over budget raises
+`ContextBudgetExceeded` and the cycle aborts *before* the API call.
+
+Measured on live runs against the paper account:
+
+| | tokens |
+| --- | --- |
+| Simple cycle, no tools | 2,019 |
+| Three tool calls over three round trips (peak) | 3,062 |
+| Budget | 10,000 |
+
+Every cycle logs its own `peak_prompt_tokens` alongside the budget in
+`cycles.full_prompt`, so drift is visible without re-running anything.
+
+### Theses
+
+Thesis writes ride along with an executed order rather than getting their own
+tool — spec.MD allows exactly one write tool, and a thesis with no position
+behind it is not worth storing. An executed buy opens or updates the thesis; a
+sell that leaves the position flat closes it; a partial sell leaves it open.
 
 
 ## Architecture notes
@@ -165,8 +233,21 @@ Nothing was dropped or renamed. Additions:
 - `flags` is new — the kill switch and the latched daily-loss halt both need
   somewhere that survives a restart and can be flipped from outside the process.
 
+## Tests
+
+`uv run pytest` — 177 tests, ruff clean. The structural invariants are worth
+knowing about, because they fail the build rather than relying on review:
+
+| File | Guards |
+| --- | --- |
+| `test_paper_only.py` | no live endpoint in `src/`, endpoint not configurable |
+| `test_no_bypass.py` | one caller of `submit_order`, `evaluate` dominates it, no skip argument, one write tool, no shell/HTTP in the tool layer |
+| `test_risk_checks.py` | every check: passing, failing, boundary |
+| `test_risk_adversarial.py` | the hostile battery through the real execution path |
+| `test_llm.py` | tool loop, one-order rule, budget asserted every iteration |
+| `test_prompts.py` | no prompt text inline in `src/`, no strategy in the placeholder |
+
 ## Not yet built
 
-Phase 3 (the agent) and Phase 4 (evaluation harness). The `prompts/` directory is
-empty until Phase 3, and the agent is still the Phase 1 stub — nothing has
-proposed a real order yet.
+Phase 4 (evaluation harness). Nothing has been run against a full live session
+yet — Phase 3 was verified with single cycles.

@@ -9,16 +9,26 @@ cycle.py should need to change when it does.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from trader.state import CycleContext, render_state
+
+if TYPE_CHECKING:
+    from trader.execution import ExecutionResult
 
 
 @dataclass(frozen=True, slots=True)
 class AgentResult:
-    """What one agent invocation produced. Purely descriptive — it executes nothing."""
+    """What one agent invocation produced.
 
-    action: str  # "no_action" in Phase 1; "buy"/"sell" proposals arrive in Phase 3
+    `executions` is non-empty when the agent already routed an order through
+    `execution.place_order` from inside its tool loop — which the tool-using
+    agent does, because the model has to see the risk verdict as a tool result.
+    A stub or scripted agent leaves it empty and lets run_cycle do the routing.
+    Either way the order passed the same single gated path.
+    """
+
+    action: str  # "no_action", or the "buy"/"sell" the agent settled on
     reasoning: str
     symbol: str | None = None
     qty: float | None = None
@@ -28,6 +38,8 @@ class AgentResult:
     full_prompt: str | None = None
     full_response: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    executions: list[ExecutionResult] = field(default_factory=list)
+    stop_reason: str | None = None
 
 
 class Agent(Protocol):
