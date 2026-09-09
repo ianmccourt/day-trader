@@ -34,7 +34,7 @@ uv run trader --text-logs ...      # human-readable logs instead of JSON lines
 without any Alpaca credentials.
 
 `--stub` runs the Phase 1 stub agent instead of the model (no Anthropic key
-needed). `--effort low|medium|high|max` and `--no-thinking` tune the model call.
+needed). `--effort low|medium|high|xhigh|max` and `--no-thinking` tune the model call.
 
 Risk limits live in [`risk.toml`](risk.toml) (stdlib `tomllib`, no YAML
 dependency). Loading is strict — an unknown or misspelled key is a fatal error,
@@ -142,7 +142,7 @@ real SQLite file.
 
 ## Phase 3 — the agent
 
-`claude-sonnet-4-6` via the `anthropic` SDK, in a **manual** tool loop —
+`claude-sonnet-5` via the `anthropic` SDK, in a **manual** tool loop —
 not the SDK's tool runner. The loop has to interpose the risk layer between the
 model's proposal and the broker and hand the verdict back as a tool result, and
 spec.MD asks to own every failure mode.
@@ -189,7 +189,7 @@ Measured on live runs against the paper account:
 
 | | tokens |
 | --- | --- |
-| Simple cycle, no tools | 2,019 |
+| Simple cycle, no tools | 2,019-2,538 |
 | Three tool calls over three round trips (peak) | 3,062 |
 | Budget | 10,000 |
 

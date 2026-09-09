@@ -28,8 +28,9 @@ MARKET_TZ = ZoneInfo("America/New_York")
 RTH_OPEN = (9, 30)
 RTH_CLOSE = (16, 0)
 
-#: Model used from Phase 3 onward.
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
+#: Model used from Phase 3 onward. Current-generation Sonnet: adaptive thinking
+#: is the only on-mode, `budget_tokens` is rejected, and effort adds `xhigh`.
+ANTHROPIC_MODEL = "claude-sonnet-5"
 
 #: Hard ceiling on assembled prompt size, enforced before every API call
 #: (SPEC.md constraint #4).

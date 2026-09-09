@@ -243,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--effort",
         default="medium",
-        choices=["low", "medium", "high", "max"],
+        choices=["low", "medium", "high", "xhigh", "max"],
         help="model effort level (default: medium)",
     )
     p.add_argument(
