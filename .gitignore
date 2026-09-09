@@ -1,0 +1,26 @@
+# Secrets — never commit. Present from the first commit (SPEC.md §5).
+.env
+.env.*
+!.env.example
+
+# Local state
+data/
+*.db
+*.sqlite3
+*.sqlite3-journal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
