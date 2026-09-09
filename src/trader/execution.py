@@ -128,6 +128,7 @@ def place_order(
             risk_result=verdict.summary,
             broker_order_id=None,
             outcome="rejected",
+            reference_price=proposal.reference_price,
         )
         return ExecutionResult(proposal, verdict, decision_id=decision_id)
 
@@ -149,6 +150,7 @@ def place_order(
             risk_result=verdict.summary,
             broker_order_id=None,
             outcome=f"broker_error: {exc}",
+            reference_price=proposal.reference_price,
         )
         return ExecutionResult(proposal, verdict, broker_error=str(exc), decision_id=decision_id)
 
@@ -172,5 +174,6 @@ def place_order(
         risk_result=verdict.summary,
         broker_order_id=receipt.order_id,
         outcome=receipt.status,
+        reference_price=proposal.reference_price,
     )
     return ExecutionResult(proposal, verdict, receipt=receipt, decision_id=decision_id)

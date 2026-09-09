@@ -76,5 +76,7 @@ def test_the_parser_exposes_the_documented_commands() -> None:
         "show",
         "risk",
         "rejections",
+        "reconcile",
+        "evaluate",
         "kill",
     }

@@ -17,7 +17,7 @@ from typing import Any
 
 from trader.constants import MAX_THESIS_RATIONALE_CHARS
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Deviations from SPEC.md's starting schema, and why:
 #   * positions_snapshot gains cycle_id, current_price and market_value. The
@@ -27,7 +27,12 @@ SCHEMA_VERSION = 1
 #     today" with an index hit rather than a date-parsing scan.
 #   * flags is new: the kill switch needs somewhere to live that survives a
 #     restart and can be flipped from outside the process.
-# No column from the spec was dropped or renamed.
+#   * decisions gains reference_price (v2) plus the four fill columns filled by
+#     `trader reconcile`. Phase 4 needs entry and exit prices to compute a win
+#     rate and a holding period, and the broker's fill is the only truth for
+#     those. All are nullable and additive.
+# No column from the spec was dropped or renamed, and no migration rewrites or
+# deletes a row — see MIGRATIONS below.
 SCHEMA = f"""
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -105,7 +110,12 @@ CREATE TABLE IF NOT EXISTS decisions (
     reasoning       TEXT,
     risk_result     TEXT,                        -- approved | rejected:<check>
     broker_order_id TEXT,
-    outcome         TEXT
+    outcome         TEXT,
+    reference_price REAL,                        -- price the risk layer sized on
+    filled_qty       REAL,                       -- the four below are filled in
+    filled_avg_price REAL,                       -- by `trader reconcile`, from
+    filled_at        TEXT,                       -- the broker's own record
+    final_status     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_cycle ON decisions(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_time ON decisions(timestamp);
@@ -139,15 +149,42 @@ def iso(ts: datetime) -> str:
     return ts.astimezone(UTC).isoformat(timespec="milliseconds")
 
 
+#: Additive-only. Each entry is (column, DDL type). A migration may add a
+#: nullable column and nothing else — never drop, rename, or rewrite, because
+#: the logged history is the point of this database.
+MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "decisions": [
+        ("reference_price", "REAL"),
+        ("filled_qty", "REAL"),
+        ("filled_avg_price", "REAL"),
+        ("filled_at", "TEXT"),
+        ("final_status", "TEXT"),
+    ],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> list[str]:
+    """Bring an existing database up to the current schema. Additive only."""
+    applied: list[str] = []
+    for table, columns in MIGRATIONS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                applied.append(f"{table}.{name}")
+    return applied
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and initialise, if new) the database at `db_path`."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, isolation_level=None, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.execute(
         "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) "
-        "ON CONFLICT(key) DO NOTHING",
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (str(SCHEMA_VERSION),),
     )
     return conn
@@ -287,13 +324,14 @@ def record_decision(
     risk_result: str | None = None,
     broker_order_id: str | None = None,
     outcome: str | None = None,
+    reference_price: float | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO decisions(
             cycle_id, timestamp, action, symbol, qty, reasoning,
-            risk_result, broker_order_id, outcome)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            risk_result, broker_order_id, outcome, reference_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             cycle_id,
@@ -305,6 +343,7 @@ def record_decision(
             risk_result,
             broker_order_id,
             outcome,
+            reference_price,
         ),
     )
     row_id = cur.lastrowid
@@ -361,3 +400,30 @@ def get_flag(conn: sqlite3.Connection, key: str) -> str | None:
 
 def kill_switch_engaged(conn: sqlite3.Connection) -> bool:
     return (get_flag(conn, KILL_SWITCH) or "0") == "1"
+
+
+def unreconciled_orders(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
+    """Submitted orders whose terminal state we have not read back yet."""
+    return conn.execute(
+        "SELECT id, broker_order_id, symbol FROM decisions "
+        "WHERE broker_order_id IS NOT NULL AND final_status IS NULL "
+        "ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def record_fill(
+    conn: sqlite3.Connection,
+    decision_id: int,
+    *,
+    final_status: str,
+    filled_qty: float,
+    filled_avg_price: float | None,
+    filled_at: str | None,
+) -> None:
+    """Write a broker fill onto its decision row. Only ever fills in NULLs."""
+    conn.execute(
+        "UPDATE decisions SET final_status = ?, filled_qty = ?, "
+        "filled_avg_price = ?, filled_at = ? WHERE id = ?",
+        (final_status, filled_qty, filled_avg_price, filled_at, decision_id),
+    )

@@ -56,6 +56,22 @@ class OrderReceipt:
     filled_qty: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class OrderFill:
+    """An order's terminal state, read back from the broker for evaluation."""
+
+    order_id: str
+    status: str
+    filled_qty: float
+    filled_avg_price: float | None
+    filled_at: datetime | None
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether the broker is done with this order and it will not change."""
+        return self.status in {"filled", "canceled", "expired", "rejected", "done_for_day"}
+
+
 class Broker(Protocol):
     """The surface the harness depends on. The test fake implements this too."""
 
@@ -65,6 +81,7 @@ class Broker(Protocol):
     def get_latest_price(self, symbol: str) -> float: ...
     def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]: ...
     def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt: ...
+    def get_order(self, order_id: str) -> OrderFill: ...
 
 
 def _f(value: Any) -> float | None:
@@ -224,4 +241,18 @@ class AlpacaBroker:
             status=str(getattr(order.status, "value", order.status)),
             submitted_at=order.submitted_at,
             filled_qty=_f(order.filled_qty),
+        )
+
+    def get_order(self, order_id: str) -> OrderFill:
+        """Read one order back. Used by `trader reconcile`, never in a cycle."""
+        try:
+            order = self._client.get_order_by_id(order_id)
+        except Exception as exc:
+            raise BrokerError(f"get_order({order_id}) failed: {exc}") from exc
+        return OrderFill(
+            order_id=str(order.id),
+            status=str(getattr(order.status, "value", order.status)),
+            filled_qty=_f(order.filled_qty) or 0.0,
+            filled_avg_price=_f(order.filled_avg_price),
+            filled_at=order.filled_at,
         )

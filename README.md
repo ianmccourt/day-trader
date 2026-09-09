@@ -6,7 +6,7 @@ there is no config flag, env var, or argument in this repo that can change it.
 `tests/test_paper_only.py` fails the build if a live endpoint appears anywhere
 in `src/`.
 
-Built in the phases laid out in `spec.MD`. **Phases 1-3 are complete.**
+Built in the phases laid out in `spec.MD`. **All four phases are complete.**
 
 ## Setup
 
@@ -26,12 +26,15 @@ uv run trader cycles --limit 25    # recent cycles, one line each
 uv run trader show <cycle_id>      # full prompt + response for one cycle
 uv run trader risk                 # the loaded limits and the checks that will run
 uv run trader rejections           # risk rejections, by check and most recent
+uv run trader reconcile            # read submitted orders back from the broker
+uv run trader evaluate --start ... --end ...   # did it beat doing nothing?
 uv run trader kill on|off|status   # kill switch (persisted in the DB)
 uv run trader --text-logs ...      # human-readable logs instead of JSON lines
 ```
 
-`status`, `cycles`, `show`, `rejections` and `kill` read only the DB and work
-without any Alpaca credentials.
+`status`, `cycles`, `show`, `rejections`, `kill` and `evaluate` read only the DB
+and work without any Alpaca credentials (`evaluate` drops the SPY benchmark and
+says so).
 
 `--stub` runs the Phase 1 stub agent instead of the model (no Anthropic key
 needed). `--effort low|medium|high|xhigh|max` and `--no-thinking` tune the model call.
@@ -204,6 +207,65 @@ behind it is not worth storing. An executed buy opens or updates the thesis; a
 sell that leaves the position flat closes it; a partial sell leaves it open.
 
 
+## Phase 4 — evaluation harness
+
+```bash
+uv run trader evaluate --start 2026-09-01 --end 2026-09-05
+uv run python scripts/demo_evaluation.py     # the same report over synthetic data
+```
+
+```
+VERDICT: beat cash (+0.69%); lost to buy-and-hold SPY (-1.22% excess)
+
+Return
+  strategy              +0.69%   ($100,000.00 -> $100,690.00)
+  doing nothing         +0.00%   (cash)
+  buy-and-hold SPY      +1.91%   ($760.00 -> $774.50)
+
+Trading
+  orders submitted           5      round trips                2
+  confirmed filled           5      win rate               50.0%   (1W / 1L)
+  unreconciled               0      avg holding            48.5h
+                                    realized P&L         $106.50
+                                    still open             QQQ 8
+
+Risk rejections   4      2 max_orders_per_hour, 1 max_position_notional,
+                         1 symbol_allowlist
+Cycles           12      11 ok, 1 error      28,800 in / 2,160 out
+```
+
+`--json` gives the machine-readable form. The report reads only logged history
+plus one benchmark series — it never re-runs a cycle, and evaluating the same
+window twice gives the same answer (there's a test for that).
+
+### Things it deliberately refuses to guess
+
+- **A sell with no matching buy inside the window is skipped**, not paired with
+  an invented entry price. The position was opened before the window; a
+  fabricated entry would go straight into the win rate.
+- **A window with fewer than two SPY sessions says so** instead of reporting a
+  0% benchmark, which would read as a real result. It falls back to
+  open-to-close and labels it.
+- **No broker means no benchmark**, not a zero.
+- **Canceled and rejected orders are not fills.** Orders that are merely
+  unreconciled fall back to the risk layer's reference price, and the report
+  counts them separately as `prices_estimated` so the win rate carries its
+  caveat.
+- **A flat return "matched" cash**; it did not lose to it.
+- **When nothing was traded, the verdict says so** rather than crediting the
+  agent with a drift it had no part in.
+
+Round trips are matched **FIFO per symbol** — the convention, and it needs no
+configuration.
+
+### Fills
+
+Win rate and holding period need real entry and exit prices, and the broker's
+fill is the only truth for those. `trader reconcile` reads submitted orders back
+and records `final_status`, `filled_qty`, `filled_avg_price`, `filled_at` on the
+decision row. Orders still working are left alone for a later run.
+
+
 ## Architecture notes
 
 - **Short independent invocations, not one conversation.** APScheduler fires
@@ -232,10 +294,14 @@ Nothing was dropped or renamed. Additions:
   positions alone do not give one.
 - `flags` is new — the kill switch and the latched daily-loss halt both need
   somewhere that survives a restart and can be flipped from outside the process.
+- `decisions` gains `reference_price` plus four nullable fill columns (schema
+  v2), applied to existing databases by an **additive-only** migration in
+  `db.MIGRATIONS` — it may add a nullable column and nothing else. No migration
+  drops, renames, or rewrites, because the logged history is the point.
 
 ## Tests
 
-`uv run pytest` — 177 tests, ruff clean. The structural invariants are worth
+`uv run pytest` — 203 tests, ruff clean. The structural invariants are worth
 knowing about, because they fail the build rather than relying on review:
 
 | File | Guards |
@@ -246,8 +312,11 @@ knowing about, because they fail the build rather than relying on review:
 | `test_risk_adversarial.py` | the hostile battery through the real execution path |
 | `test_llm.py` | tool loop, one-order rule, budget asserted every iteration |
 | `test_prompts.py` | no prompt text inline in `src/`, no strategy in the placeholder |
+| `test_evaluate.py` | FIFO matching, window boundaries, and every case the report refuses to guess |
 
-## Not yet built
+## What has actually been run
 
-Phase 4 (evaluation harness). Nothing has been run against a full live session
-yet — Phase 3 was verified with single cycles.
+Against the live paper account: single cycles (reads, tool loop, budget), one
+1-share SPY order end to end through the risk layer to a confirmed fill,
+reconciliation, and evaluation. **A full unattended session has not been run
+yet** — that is the obvious next step, and `trader run` is what does it.

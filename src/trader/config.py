@@ -67,8 +67,16 @@ def load_settings(*, require_broker: bool = True) -> Settings:
             "the scheduler builds a cron minute-step from it."
         )
     return Settings(
-        alpaca_api_key=_require("ALPACA_API_KEY") if require_broker else "",
-        alpaca_secret_key=_require("ALPACA_SECRET_KEY") if require_broker else "",
+        alpaca_api_key=(
+            _require("ALPACA_API_KEY")
+            if require_broker
+            else os.environ.get("ALPACA_API_KEY", "").strip()
+        ),
+        alpaca_secret_key=(
+            _require("ALPACA_SECRET_KEY")
+            if require_broker
+            else os.environ.get("ALPACA_SECRET_KEY", "").strip()
+        ),
         db_path=Path(os.environ.get("TRADER_DB_PATH", "data/trader.sqlite3")),
         cycle_minutes=cycle_minutes,
         log_level=os.environ.get("TRADER_LOG_LEVEL", "INFO").upper(),

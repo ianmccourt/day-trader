@@ -22,9 +22,12 @@ from trader.db import (
     kill_switch_engaged,
     last_cycle,
     reconcile_orphan_cycles,
+    record_fill,
     set_flag,
+    unreconciled_orders,
     utcnow,
 )
+from trader.evaluate import EvaluationError, evaluate, format_report
 from trader.llm import AnthropicAgent
 from trader.prompts import PromptError
 from trader.risk.checks import CHECK_NAMES
@@ -221,6 +224,56 @@ def cmd_rejections(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reconcile(settings: Settings, args: argparse.Namespace) -> int:
+    """Read submitted orders back from the broker and record their fills."""
+    conn, broker = _open(settings)
+    pending = unreconciled_orders(conn, limit=args.limit)
+    if not pending:
+        print("nothing to reconcile")
+        return 0
+    done = skipped = 0
+    for row in pending:
+        fill = broker.get_order(row["broker_order_id"])
+        if not fill.is_terminal:
+            # Still working. Leave it NULL so a later run picks it up.
+            skipped += 1
+            continue
+        record_fill(
+            conn,
+            row["id"],
+            final_status=fill.status,
+            filled_qty=fill.filled_qty,
+            filled_avg_price=fill.filled_avg_price,
+            filled_at=fill.filled_at.isoformat() if fill.filled_at else None,
+        )
+        done += 1
+        print(
+            f"  {row['symbol']:<6} {fill.status:<12} "
+            f"{fill.filled_qty:g} @ {fill.filled_avg_price or '-'}"
+        )
+    print(f"reconciled {done}, still open {skipped}")
+    return 0
+
+
+def cmd_evaluate(settings: Settings, args: argparse.Namespace) -> int:
+    """Did the agent beat doing nothing, over a range of logged cycles?"""
+    conn = connect(settings.db_path)
+    broker: Broker | None = None
+    # Without keys the report just says the benchmark is unavailable — the rest
+    # of the evaluation is pure DB and still worth printing.
+    if not args.no_benchmark and settings.alpaca_api_key and settings.alpaca_secret_key:
+        broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key)
+
+    start = args.start or trading_day_for(utcnow())
+    end = args.end or trading_day_for(utcnow())
+    report = evaluate(conn, start, end, broker=broker)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+    else:
+        print(format_report(report))
+    return 0
+
+
 def cmd_kill(settings: Settings, args: argparse.Namespace) -> int:
     conn = connect(settings.db_path)
     if args.state == "status":
@@ -283,6 +336,19 @@ def build_parser() -> argparse.ArgumentParser:
     rej.add_argument("--limit", type=int, default=20)
     rej.set_defaults(func=cmd_rejections)
 
+    rec = sub.add_parser("reconcile", help="read submitted orders back from the broker")
+    rec.add_argument("--limit", type=int, default=200)
+    rec.set_defaults(func=cmd_reconcile)
+
+    ev = sub.add_parser("evaluate", help="did the agent beat doing nothing?")
+    ev.add_argument("--start", help="first trading day, YYYY-MM-DD (default: today)")
+    ev.add_argument("--end", help="last trading day, YYYY-MM-DD (default: today)")
+    ev.add_argument("--json", action="store_true", help="machine-readable output")
+    ev.add_argument(
+        "--no-benchmark", action="store_true", help="skip the SPY benchmark (no broker call)"
+    )
+    ev.set_defaults(func=cmd_evaluate)
+
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("state", choices=["on", "off", "status"])
     kill.add_argument("--note", default=None)
@@ -293,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    needs_broker = args.command in {"run", "cycle"}
+    needs_broker = args.command in {"run", "cycle", "reconcile"}
     try:
         settings = load_settings(require_broker=needs_broker)
     except MissingCredential as exc:
@@ -314,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
     except PromptError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except EvaluationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
