@@ -36,12 +36,30 @@ def write(tmp_path: Path, body: str) -> Path:
     return path
 
 
-def test_loads_the_shipped_config() -> None:
-    """The risk.toml in the repo must actually parse."""
-    config = load_risk_config(DEFAULT_RISK_CONFIG_PATH)
+SHIPPED = [DEFAULT_RISK_CONFIG_PATH, Path("risk.conservative.toml")]
+
+
+@pytest.mark.parametrize("path", SHIPPED, ids=[p.name for p in SHIPPED])
+def test_every_shipped_config_parses(path: Path) -> None:
+    """Both files in the repo must load. Neither pins a risk appetite here —
+    that is the operator's choice, and this test would otherwise fail every
+    time the limits are retuned."""
+    config = load_risk_config(path)
     assert config.max_position_notional > 0
-    assert "SPY" in config.symbol_allowlist
-    assert config.allow_shorts is False
+    assert config.max_total_exposure >= config.max_position_notional
+    assert config.symbol_allowlist
+    assert isinstance(config.allow_shorts, bool)
+
+
+@pytest.mark.parametrize("path", SHIPPED, ids=[p.name for p in SHIPPED])
+def test_shipped_configs_are_internally_coherent(path: Path) -> None:
+    """Limits that contradict each other silently make one of them dead code."""
+    config = load_risk_config(path)
+    # A per-symbol cap above the portfolio cap means the portfolio cap is the
+    # only one that ever fires.
+    assert config.max_position_notional <= config.max_total_exposure
+    # An hourly cap above the daily cap can never bind.
+    assert config.max_orders_per_hour <= config.max_orders_per_day
 
 
 def test_loads_a_valid_file(tmp_path: Path) -> None:

@@ -1,41 +1,79 @@
-# Risk limits. Every order proposal is checked against every one of these
-# before it can reach the broker; there is no path around them.
+# HIGH-RISK configuration. Paper account only.
 #
-# Notional figures are USD. Counts are per rolling window.
-# Unknown keys are a hard error at load time: a typo here must never silently
-# disable a limit.
+# Sized against ~$100k paper equity with 4x day-trading buying power
+# (~$399k). These limits are deliberately aggressive: the point is to find
+# where the harness and the agent break, not to preserve capital.
+#
+# The previous conservative settings are kept in risk.conservative.toml.
+# Switch with:  uv run trader --risk-config risk.conservative.toml run
+#
+# Unknown keys are still a hard error at load time.
 
 [limits]
-# Per-symbol cap on the resulting position's absolute market value.
-max_position_notional = 5000.0
+# 25% of equity in a single name. Was $5,000 (5%).
+max_position_notional = 25000.0
 
-# Portfolio-wide cap on the sum of absolute position market values.
-max_total_exposure = 25000.0
+# 2x equity, i.e. half the available 4x day-trading buying power. Leaves
+# headroom so a gap against a levered position cannot trigger a margin call
+# mid-session. Was $25,000 (0.25x).
+max_total_exposure = 200000.0
 
-# Trading halts for the rest of the trading day once equity has fallen this
-# far below the prior close. The halt latches — an intraday recovery does not
-# re-enable trading.
-max_daily_loss = 2000.0
+# 10% of equity. This LATCHES — once breached, trading is halted for the rest
+# of the trading day and an intraday recovery does not re-enable it. At this
+# size it is the real backstop, so leave it enabled. Was $2,000 (2%).
+max_daily_loss = 10000.0
 
-# Rolling-window order limits, counted from orders this harness submitted.
-max_orders_per_hour = 6
-max_orders_per_day = 20
+# Rate limits. NOTE: these do not bind at the default 15-minute cadence — the
+# agent may place at most one order per cycle, so cadence is the real ceiling
+# (15 min -> 4/hour, 26/day). To make these meaningful, drop
+# TRADER_CYCLE_MINUTES to 3 (20/hour, 130/day) or 2 (30/hour, 195/day).
+# See the token-cost note in the README before doing that.
+max_orders_per_hour = 20
+max_orders_per_day = 100
 
 [universe]
-# Explicit allowlist. Nothing outside this list is tradeable, ever.
+# High-beta liquid names plus 3x leveraged ETFs. The leveraged tickers
+# (TQQQ/SQQQ/SOXL/SOXS) move ~3x the underlying, so a position at the
+# $25,000 cap carries roughly $75,000 of effective exposure — stacked on the
+# 2x portfolio cap that is real leverage, and it is intentional here.
 symbol_allowlist = [
+    # mega-cap tech
     "AAPL",
+    "AMZN",
+    "AVGO",
+    "GOOGL",
+    "META",
     "MSFT",
+    "NFLX",
     "NVDA",
-    "SPY",
+    # high-beta single names
+    "AMD",
+    "COIN",
+    "MSTR",
+    "PLTR",
+    "SMCI",
+    "TSLA",
+    # index ETFs
+    "IWM",
     "QQQ",
+    "SPY",
+    # 3x leveraged ETFs
+    "SOXL",
+    "SOXS",
+    "SQQQ",
+    "TQQQ",
 ]
 
 [session]
-# Reject orders whenever the broker clock says the market is closed.
+# Left ON. Extended-hours fills are unrepresentative even on paper, and the
+# broker clock gate is a separate mechanism from this check. Flip to false
+# only if you specifically want to test after-hours behaviour.
 regular_trading_hours_only = true
 
-# Reject any order that would open or increase a short position. Not in
-# spec.MD's list; added because "sell 1000 of a 10-share position" is
-# otherwise a naked short that only max_position_notional would catch.
-allow_shorts = false
+# Shorting ENABLED. This is the single largest safety reduction in this file:
+# it disables the no_unintended_short check entirely, which means "sell 1000"
+# against a 10-share position is now a legal 990-share naked short rather than
+# a rejection. Only max_position_notional and max_total_exposure bound short
+# size, and both measure absolute notional. Losses on a short are unbounded to
+# the upside; max_daily_loss is what stops the day.
+allow_shorts = true

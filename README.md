@@ -44,6 +44,61 @@ dependency). Loading is strict — an unknown or misspelled key is a fatal error
 because a typo that silently left a limit at its default is the worst thing this
 file could do.
 
+**Two configs ship.** `risk.toml` is currently the high-risk one; the original
+conservative limits are in `risk.conservative.toml`. Switch per-invocation:
+
+```bash
+uv run trader --risk-config risk.conservative.toml run
+```
+
+| | conservative | high-risk (current) |
+| --- | ---: | ---: |
+| `max_position_notional` | $5,000 | **$25,000** |
+| `max_total_exposure` | $25,000 | **$200,000** |
+| `max_daily_loss` | $2,000 | **$10,000** |
+| `max_orders_per_hour` / `per_day` | 6 / 20 | **20 / 100** |
+| allowlist | 5 large caps | **21 names incl. 3x ETFs** |
+| `allow_shorts` | false | **true** |
+
+Against ~$100k paper equity with 4x day-trading buying power (~$399k), that is
+25% of equity in one name and 2x equity across the book.
+
+### What raising the limits actually changed
+
+`allow_shorts = true` is the largest single reduction in safety — it removes
+the `no_unintended_short` check entirely, so a sell larger than the position is
+no longer rejected as such. Only the notional caps bound short size:
+
+```
+holding 10 AAPL @ $100          conservative              high-risk
+  sell    50 -> net    -40 sh   rejected (short)          ALLOWED
+  sell   100 -> net    -90 sh   rejected (short)          ALLOWED
+  sell   260 -> net   -250 sh   rejected (short)          ALLOWED  ($25,000, at the cap)
+  sell 5,000 -> net -4,990 sh   rejected                  rejected (notional)
+```
+
+Losses on a short are unbounded to the upside; `max_daily_loss` is what stops
+the day, and it latches.
+
+Everything structural still holds — the paper endpoint, the single gated order
+path, the one write tool, proposal sanity, the allowlist, RTH, and the kill
+switch are all unchanged. These are limits, not mechanisms.
+
+### Order rate is set by cadence, not by risk.toml
+
+The agent may place **at most one order per cycle**, so the cycle interval is
+the real ceiling:
+
+| `TRADER_CYCLE_MINUTES` | max orders/hour | max orders/day | tokens/week | cost/week |
+| ---: | ---: | ---: | ---: | ---: |
+| 15 (default) | 4 | 26 | 535K | $1.36 |
+| 5 | 12 | 78 | 1.6M | $4.07 |
+| 3 | 20 | 130 | 2.7M | $6.79 |
+| 2 | 30 | 195 | 4.0M | $10.18 |
+
+At the default 15 minutes, `max_orders_per_hour = 20` can never fire. Drop the
+cadence to 3 minutes to make it bind.
+
 ## Running and monitoring
 
 ### Start it
