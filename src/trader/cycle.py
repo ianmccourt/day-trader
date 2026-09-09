@@ -24,6 +24,8 @@ from trader.db import (
     record_positions,
     utcnow,
 )
+from trader.execution import ExecutionResult, build_proposal, place_order
+from trader.risk.config import RiskConfig
 from trader.state import build_cycle_context, trading_day_for
 
 log = logging.getLogger("trader.cycle")
@@ -41,6 +43,7 @@ class CycleOutcome:
     status: str
     duration_ms: int
     result: AgentResult | None = None
+    execution: ExecutionResult | None = None
     error: str | None = None
 
 
@@ -49,12 +52,15 @@ def run_cycle(
     broker: Broker,
     agent: Agent,
     *,
+    risk_config: RiskConfig | None = None,
     force: bool = False,
 ) -> CycleOutcome:
     """Run exactly one cycle. Never raises: failures are logged and persisted.
 
-    `force` bypasses only the market-open gate (for dry runs outside RTH). It
-    does not bypass the kill switch, which has no override by design.
+    `force` bypasses only the scheduler-level market-open gate, so a dry run can
+    exercise the loop outside RTH. It does not bypass the kill switch and it
+    does not bypass the risk layer: `regular_trading_hours_only` still rejects
+    the order downstream.
     """
     started = utcnow()
     day = trading_day_for(started)
@@ -63,7 +69,11 @@ def run_cycle(
     log.info("cycle_start", extra={"cycle_id": cycle_id, "trading_day": day})
 
     def finish(
-        status: str, *, result: AgentResult | None = None, error: str | None = None
+        status: str,
+        *,
+        result: AgentResult | None = None,
+        execution: ExecutionResult | None = None,
+        error: str | None = None,
     ) -> CycleOutcome:
         duration_ms = int((time.perf_counter() - t0) * 1000)
         close_cycle(
@@ -89,7 +99,7 @@ def run_cycle(
                 "error": error,
             },
         )
-        return CycleOutcome(cycle_id, status, duration_ms, result, error)
+        return CycleOutcome(cycle_id, status, duration_ms, result, execution, error)
 
     # Kill switch is checked at the top of every cycle (SPEC.md risk layer).
     # Re-checked before any order in Phase 2.
@@ -120,18 +130,38 @@ def run_cycle(
         log.error("agent_error", extra={"cycle_id": cycle_id}, exc_info=True)
         return finish(STATUS_ERROR, error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
 
-    # Phase 1: the stub only ever produces no_action, and there is no execution
-    # path. Recording it anyway keeps `decisions` a complete audit trail — a
-    # cycle that chose to do nothing is a decision I want to be able to query.
-    record_decision(
-        conn,
-        cycle_id=cycle_id,
-        action=result.action,
-        symbol=result.symbol,
-        qty=result.qty,
-        reasoning=result.reasoning,
-        risk_result=None,
-        broker_order_id=None,
-        outcome="no_execution_path_in_phase_1" if result.action == "no_action" else None,
-    )
-    return finish(STATUS_OK, result=result)
+    if result.action not in ("buy", "sell"):
+        # A cycle that chose to do nothing is still a decision worth querying.
+        record_decision(
+            conn,
+            cycle_id=cycle_id,
+            action=result.action,
+            reasoning=result.reasoning,
+            outcome="no_order_proposed",
+        )
+        return finish(STATUS_OK, result=result)
+
+    if risk_config is None:
+        # Refuse rather than fall back to defaults: an order sized against
+        # limits nobody configured is exactly the failure this layer exists
+        # to prevent.
+        return finish(
+            STATUS_ERROR,
+            result=result,
+            error="agent proposed an order but no risk config was supplied to run_cycle",
+        )
+
+    try:
+        proposal = build_proposal(
+            broker,
+            action=result.action,
+            symbol=result.symbol or "",
+            qty=result.qty if result.qty is not None else float("nan"),
+            reasoning=result.reasoning,
+        )
+    except BrokerError as exc:
+        log.error("pricing_failed", extra={"cycle_id": cycle_id}, exc_info=True)
+        return finish(STATUS_ERROR, result=result, error=f"{type(exc).__name__}: {exc}")
+
+    execution = place_order(conn, broker, ctx, proposal, risk_config)
+    return finish(STATUS_OK, result=result, execution=execution)

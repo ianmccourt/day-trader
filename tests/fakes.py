@@ -1,4 +1,4 @@
-"""In-memory broker double. Phase 2 extends it with order submission."""
+"""In-memory broker double. Implements the full Broker protocol."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from trader.broker import BrokerError, Clock
+from trader.broker import BrokerError, Clock, OrderReceipt
 from trader.constants import MARKET_TZ
 from trader.db import iso, utcnow
 
@@ -18,8 +18,11 @@ class FakeBroker:
     last_equity: float = 100_000.0
     cash: float = 100_000.0
     positions: list[dict[str, Any]] = field(default_factory=list)
+    prices: dict[str, float] = field(default_factory=dict)
+    default_price: float = 100.0
     fail_on: set[str] = field(default_factory=set)
     calls: list[str] = field(default_factory=list)
+    submitted: list[dict[str, Any]] = field(default_factory=list)
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
@@ -54,6 +57,20 @@ class FakeBroker:
         self._check("get_positions")
         captured_at = iso(utcnow())
         return [dict(p, captured_at=captured_at) for p in self.positions]
+
+    def get_latest_price(self, symbol: str) -> float:
+        self._check("get_latest_price")
+        return self.prices.get(symbol.upper(), self.default_price)
+
+    def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt:
+        self._check("submit_order")
+        self.submitted.append({"symbol": symbol, "qty": qty, "side": side})
+        return OrderReceipt(
+            order_id=f"fake-order-{len(self.submitted)}",
+            status="accepted",
+            submitted_at=utcnow(),
+            filled_qty=0.0,
+        )
 
 
 def position(

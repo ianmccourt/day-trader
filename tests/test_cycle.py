@@ -14,6 +14,7 @@ from trader.cycle import (
     run_cycle,
 )
 from trader.db import KILL_SWITCH, connect, cycles_on, reconcile_orphan_cycles, set_flag, utcnow
+from trader.risk.config import RiskConfig
 from trader.state import trading_day_for
 
 
@@ -140,3 +141,82 @@ def test_context_sees_prior_decisions_after_restart(tmp_path, broker) -> None:
 
     run_cycle(connect(db), broker, Recorder())
     assert captured == ["no_action"]
+
+
+# --- Phase 2: proposals route through the risk layer ------------------------
+
+
+class ScriptedAgent:
+    """Returns a fixed proposal. Stands in for the Phase 3 model."""
+
+    def __init__(self, action: str, symbol: str | None = None, qty: float | None = None) -> None:
+        self.action, self.symbol, self.qty = action, symbol, qty
+
+    def run(self, ctx):
+        return AgentResult(
+            action=self.action,
+            reasoning="scripted",
+            symbol=self.symbol,
+            qty=self.qty,
+            model="scripted",
+        )
+
+
+RISK = RiskConfig(
+    max_position_notional=5_000.0,
+    max_total_exposure=25_000.0,
+    max_daily_loss=2_000.0,
+    max_orders_per_hour=6,
+    max_orders_per_day=20,
+    symbol_allowlist=frozenset({"AAPL"}),
+)
+
+
+def test_an_approved_proposal_reaches_the_broker(conn, broker) -> None:
+    broker.prices["AAPL"] = 100.0
+    outcome = run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", 10), risk_config=RISK)
+    assert outcome.status == STATUS_OK
+    assert outcome.execution is not None and outcome.execution.executed
+    assert broker.submitted == [{"symbol": "AAPL", "qty": 10, "side": "buy"}]
+
+
+def test_a_rejected_proposal_never_reaches_the_broker(conn, broker) -> None:
+    outcome = run_cycle(conn, broker, ScriptedAgent("buy", "DOGE", 10), risk_config=RISK)
+    assert outcome.status == STATUS_OK  # the cycle succeeded; the order did not
+    assert outcome.execution is not None and not outcome.execution.executed
+    assert broker.submitted == []
+    assert conn.execute("SELECT COUNT(*) FROM risk_events").fetchone()[0] >= 1
+
+
+def test_a_proposal_without_a_risk_config_fails_the_cycle(conn, broker) -> None:
+    """Refuse rather than fall back to defaults nobody chose."""
+    outcome = run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", 10))
+    assert outcome.status == STATUS_ERROR
+    assert "no risk config" in (outcome.error or "")
+    assert broker.submitted == []
+
+
+def test_force_does_not_let_an_order_past_the_rth_check(conn, broker) -> None:
+    """--force is a loop-level dry run, not a risk override."""
+    broker.is_open = False
+    outcome = run_cycle(
+        conn, broker, ScriptedAgent("buy", "AAPL", 10), risk_config=RISK, force=True
+    )
+    assert outcome.execution is not None
+    assert "regular_trading_hours_only" in {f.check for f in outcome.execution.verdict.failures}
+    assert broker.submitted == []
+
+
+def test_pricing_failure_fails_the_cycle(conn, broker) -> None:
+    broker.fail_on = {"get_latest_price"}
+    outcome = run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", 10), risk_config=RISK)
+    assert outcome.status == STATUS_ERROR
+    assert "get_latest_price" in (outcome.error or "")
+    assert broker.submitted == []
+
+
+def test_a_proposal_with_no_qty_is_rejected_not_crashed(conn, broker) -> None:
+    outcome = run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", None), risk_config=RISK)
+    assert outcome.status == STATUS_OK
+    assert outcome.execution is not None
+    assert "proposal_sanity" in {f.check for f in outcome.execution.verdict.failures}

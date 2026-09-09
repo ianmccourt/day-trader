@@ -1,8 +1,9 @@
 """Alpaca broker adapter. Paper endpoint only.
 
-Phase 1 is read-only on purpose: order submission does not exist here yet, so
-"no order path outside the risk layer" is true by construction rather than by
-discipline. Phase 2 adds submission behind the risk gate.
+`submit_order` is the single mutating call in this repo. It is private by
+convention — nothing calls it but `trader.execution.place_order`, which runs the
+risk layer first, unconditionally. `tests/test_no_bypass.py` enforces that: any
+new caller fails the build.
 """
 
 from __future__ import annotations
@@ -11,7 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestTradeRequest
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest
 
 from trader.constants import ALPACA_PAPER_BASE_URL
 from trader.db import iso, utcnow
@@ -29,12 +34,22 @@ class Clock:
     next_close: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class OrderReceipt:
+    order_id: str
+    status: str
+    submitted_at: datetime | None
+    filled_qty: float | None
+
+
 class Broker(Protocol):
-    """The surface the harness depends on. The Phase 2 fake implements this too."""
+    """The surface the harness depends on. The test fake implements this too."""
 
     def get_clock(self) -> Clock: ...
     def get_account(self) -> dict[str, Any]: ...
     def get_positions(self) -> list[dict[str, Any]]: ...
+    def get_latest_price(self, symbol: str) -> float: ...
+    def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt: ...
 
 
 def _f(value: Any) -> float | None:
@@ -55,6 +70,9 @@ class AlpacaBroker:
             paper=True,
             url_override=ALPACA_PAPER_BASE_URL,
         )
+        # Market data has no paper/live distinction — it is read-only and
+        # shares the same keys.
+        self._data = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
 
     @property
     def base_url(self) -> str:
@@ -111,3 +129,51 @@ class AlpacaBroker:
             }
             for p in raw
         ]
+
+    def get_latest_price(self, symbol: str) -> float:
+        """Last trade price, used to size a proposal for the risk checks.
+
+        Sourced from the broker rather than from the model. If the model could
+        supply the price it could understate notional and walk straight through
+        every notional cap.
+        """
+        try:
+            request = StockLatestTradeRequest(symbol_or_symbols=symbol)
+            trades = self._data.get_stock_latest_trade(request)
+        except Exception as exc:
+            raise BrokerError(f"get_latest_price({symbol}) failed: {exc}") from exc
+        trade = trades.get(symbol)
+        if trade is None or trade.price is None:
+            raise BrokerError(f"no latest trade for {symbol}")
+        price = float(trade.price)
+        if price <= 0:
+            raise BrokerError(f"non-positive last price for {symbol}: {price}")
+        return price
+
+    def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt:
+        """The only mutating broker call in the repo.
+
+        Do not call this directly. `trader.execution.place_order` is the sole
+        caller and runs the risk layer first; a second caller would be a
+        bypass, which is why test_no_bypass.py checks for one.
+        """
+        if side not in ("buy", "sell"):
+            raise BrokerError(f"side must be 'buy' or 'sell', got {side!r}")
+        request = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+            # DAY, never GTC: an order that outlives the session would execute
+            # against a state no cycle ever evaluated.
+            time_in_force=TimeInForce.DAY,
+        )
+        try:
+            order = self._client.submit_order(request)
+        except Exception as exc:
+            raise BrokerError(f"submit_order({side} {qty} {symbol}) failed: {exc}") from exc
+        return OrderReceipt(
+            order_id=str(order.id),
+            status=str(getattr(order.status, "value", order.status)),
+            submitted_at=order.submitted_at,
+            filled_qty=_f(order.filled_qty),
+        )

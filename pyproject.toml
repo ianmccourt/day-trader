@@ -30,7 +30,9 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "RUF"]
+# BLE: SPEC.md forbids bare/blind excepts. Each remaining one carries a
+# noqa with the reason it is deliberate.
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "RUF", "BLE"]
 ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]

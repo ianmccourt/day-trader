@@ -21,6 +21,7 @@ from trader.broker import Broker
 from trader.constants import MARKET_TZ, RTH_CLOSE, RTH_OPEN
 from trader.cycle import CycleOutcome, run_cycle
 from trader.db import reconcile_orphan_cycles
+from trader.risk.config import RiskConfig
 
 log = logging.getLogger("trader.scheduler")
 
@@ -47,6 +48,7 @@ def run_scheduler(
     agent: Agent,
     *,
     cycle_minutes: int,
+    risk_config: RiskConfig,
     on_cycle: Callable[[CycleOutcome], None] | None = None,
 ) -> None:
     orphans = reconcile_orphan_cycles(conn)
@@ -58,7 +60,7 @@ def run_scheduler(
     scheduler = BlockingScheduler(timezone=MARKET_TZ)
 
     def job() -> None:
-        outcome = run_cycle(conn, broker, agent)
+        outcome = run_cycle(conn, broker, agent, risk_config=risk_config)
         if on_cycle:
             on_cycle(outcome)
 
@@ -85,6 +87,7 @@ def run_scheduler(
         "scheduler_start",
         extra={
             "cycle_minutes": cycle_minutes,
+            "risk_config": risk_config.source,
             "window": (
                 f"{RTH_OPEN[0]:02d}:{RTH_OPEN[1]:02d}-"
                 f"{RTH_CLOSE[0]:02d}:{RTH_CLOSE[1]:02d} ET"
