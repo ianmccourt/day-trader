@@ -406,3 +406,68 @@ def test_token_usage_accumulates_across_iterations(conn, broker) -> None:
     result = agent.run(ctx)
     assert result.prompt_tokens == 200  # two calls at 100
     assert result.completion_tokens == 100
+
+
+# --- the tool-result budget -------------------------------------------------
+#
+# Per-result truncation alone does not bound the loop: several iterations of
+# parallel calls are still tens of thousands of characters, and every one of
+# them is input tokens on the next request.
+
+
+def test_a_single_tool_result_is_truncated(conn, broker) -> None:
+    from trader.llm import MAX_TOOL_RESULT_CHARS
+
+    broker.positions = [position(f"S{i:03d}", 1, 1.0) for i in range(200)]
+    client = FakeAnthropic(
+        [tool_response(("get_recent_decisions", {"limit": 20})), text_response("ok")]
+    )
+    agent, ctx = make(conn, broker, client)
+    for i in range(200):
+        conn.execute(
+            "INSERT INTO decisions(cycle_id, timestamp, action, symbol, qty, reasoning) "
+            "VALUES (?, ?, 'buy', 'AAPL', 1, ?)",
+            (ctx.cycle_id, f"2026-09-09T10:00:0{i % 10}+00:00", "x" * 500),
+        )
+    agent.run(ctx)
+    result_text = client.requests[1]["messages"][-1]["content"][0]["content"]
+    assert len(result_text) <= MAX_TOOL_RESULT_CHARS + 20
+
+
+def test_the_cumulative_tool_budget_stops_a_runaway_loop(conn, broker) -> None:
+    from trader.llm import MAX_TOTAL_TOOL_RESULT_CHARS
+
+    broker.positions = [position(f"S{i:03d}", 1, 1.0) for i in range(50)]
+    # Six iterations, three calls each — well past the cumulative budget.
+    client = FakeAnthropic(
+        [tool_response(*[("get_risk_limits", {})] * 3) for _ in range(MAX_TOOL_ITERATIONS)]
+    )
+    agent, ctx = make(conn, broker, client)
+    result = agent.run(ctx)
+
+    exhausted = [t for t in result.tool_calls if "tool-output budget is exhausted" in t["result"]]
+    substantive = [t for t in result.tool_calls if t not in exhausted]
+
+    # Real tool output stops at the budget...
+    assert sum(len(t["result"]) for t in substantive) <= MAX_TOTAL_TOOL_RESULT_CHARS
+    # ...and what replaces it is a short note, not silence, so the model knows
+    # why its tool stopped answering. Notes are counted against the budget too,
+    # so the total stays bounded by a small constant per remaining call.
+    assert exhausted and all(t["is_error"] for t in exhausted)
+    assert all(len(t["result"]) < 200 for t in exhausted)
+    assert sum(len(t["result"]) for t in result.tool_calls) < 2 * MAX_TOTAL_TOOL_RESULT_CHARS
+
+
+def test_the_budget_does_not_fire_on_a_normal_cycle(conn, broker) -> None:
+    """The cap must be generous enough that ordinary use never sees it."""
+    client = FakeAnthropic(
+        [
+            tool_response(("get_risk_limits", {}), ("get_quote", {"symbols": ["AAPL"]})),
+            tool_response(("get_bars", {"symbol": "AAPL", "timeframe": "1Day", "limit": 10})),
+            text_response("holding"),
+        ]
+    )
+    agent, ctx = make(conn, broker, client)
+    result = agent.run(ctx)
+    assert not any("budget is exhausted" in t["result"] for t in result.tool_calls)
+    assert not any(t["is_error"] for t in result.tool_calls)

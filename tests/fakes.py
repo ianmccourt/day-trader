@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from trader.broker import BrokerError, Clock, OrderReceipt
+from trader.broker import BrokerError, Clock, OrderFill, OrderReceipt
 from trader.constants import MARKET_TZ
 from trader.db import iso, utcnow
 
@@ -61,6 +61,31 @@ class FakeBroker:
     def get_latest_price(self, symbol: str) -> float:
         self._check("get_latest_price")
         return self.prices.get(symbol.upper(), self.default_price)
+
+    def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]:
+        self._check("get_bars")
+        price = self.prices.get(symbol.upper(), self.default_price)
+        return [
+            {
+                "t": f"2026-09-{(i % 28) + 1:02d}T04:00:00+00:00",
+                "o": price,
+                "h": price * 1.01,
+                "l": price * 0.99,
+                "c": price,
+                "v": 1_000_000.0,
+            }
+            for i in range(min(limit, 30))
+        ]
+
+    def get_order(self, order_id: str) -> OrderFill:
+        self._check("get_order")
+        return OrderFill(
+            order_id=order_id,
+            status="filled",
+            filled_qty=1.0,
+            filled_avg_price=self.default_price,
+            filled_at=utcnow(),
+        )
 
     def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt:
         self._check("submit_order")

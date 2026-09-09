@@ -7,6 +7,7 @@ keeps the prompt bounded (SPEC.md constraint #4).
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -18,9 +19,31 @@ from trader.db import kill_switch_engaged, orders_since, utcnow
 
 #: Hard caps on anything variable-length that reaches the prompt. These are the
 #: only reason context stays flat over a long session.
-MAX_RENDERED_POSITIONS = 20
-MAX_RENDERED_THESES = 20
+#
+#: Capping the *count* of theses is not enough on its own: a thesis rationale is
+#: up to 800 chars and its invalidation condition is unbounded in the schema, so
+#: 20 verbose theses were worth ~32k chars of prompt. Both are truncated here
+#: as well. The full text is never lost — `get_theses` returns it untruncated,
+#: which is what that tool is for.
+MAX_RENDERED_POSITIONS = 15
+MAX_RENDERED_THESES = 8
+MAX_RENDERED_THESIS_RATIONALE = 160
+MAX_RENDERED_THESIS_INVALIDATION = 100
 MAX_RECENT_DECISIONS = 10
+
+#: Hard ceiling on the whole rendered state, enforced at the bottom of
+#: render_state. Sized from measured token counts, not guessed: with every
+#: section at its cap this lands the first request near 4,000 tokens on prose
+#: and under 5,000 even on adversarial input (a model writing 800 repeated
+#: characters into a thesis tokenizes far worse than prose). Sized so the
+#: per-section caps above come in
+#: under it with room to spare — if this one ever fires, a new section grew
+#: without a cap of its own. Anything past it is cut with a visible marker and
+#: a logged warning: a degraded state block beats a failed cycle, and the token
+#: assertion in trader.llm is still the backstop.
+MAX_STATE_CHARS = 5_000
+
+log = logging.getLogger("trader.state")
 
 
 def trading_day_for(ts: datetime) -> str:
@@ -130,6 +153,12 @@ def _money(value: float | None) -> str:
     return "n/a" if value is None else f"${value:,.2f}"
 
 
+def _clip(text: str | None, limit: int) -> str:
+    """Truncate for display only. Storage and get_theses keep the full text."""
+    value = (text or "").strip()
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
 def _render_decision(d: dict[str, Any]) -> str:
     parts = [f"- [{d['timestamp']}] cycle {d['cycle_id']}: {d['action']}"]
     if d.get("symbol"):
@@ -178,10 +207,13 @@ def render_state(ctx: CycleContext) -> str:
         lines.append("(none)")
     else:
         lines += [
-            f"- {t['symbol']} (opened {t['opened_at']}): {t['rationale']}\n"
-            f"  invalidated_if: {t['invalidation_condition']}"
+            f"- {t['symbol']} (opened {t['opened_at']}): "
+            f"{_clip(t['rationale'], MAX_RENDERED_THESIS_RATIONALE)}\n"
+            f"  invalidated_if: "
+            f"{_clip(t['invalidation_condition'], MAX_RENDERED_THESIS_INVALIDATION)}"
             for t in ctx.theses
         ]
+        lines.append("(theses are abbreviated here; call get_theses for the full text)")
 
     lines += ["", f"## Recent decisions (last {MAX_RECENT_DECISIONS})"]
     if not ctx.recent_decisions:
@@ -205,4 +237,16 @@ def render_state(ctx: CycleContext) -> str:
         ]
     if ctx.notes:
         lines += ["", "## Notes", *[f"- {n}" for n in ctx.notes]]
-    return "\n".join(lines)
+
+    rendered = "\n".join(lines)
+    if len(rendered) > MAX_STATE_CHARS:
+        # Should be unreachable given the per-section caps above. If it fires,
+        # a new section grew without a cap — say so loudly rather than quietly
+        # spending the prompt budget.
+        log.warning(
+            "state_render_truncated",
+            extra={"cycle_id": ctx.cycle_id, "chars": len(rendered), "cap": MAX_STATE_CHARS},
+        )
+        marker = "\n\n[state truncated to fit the context budget]"
+        rendered = rendered[: MAX_STATE_CHARS - len(marker)] + marker
+    return rendered

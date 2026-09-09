@@ -37,8 +37,19 @@ MAX_TOOL_ITERATIONS = 6
 #: cap here spends the prompt budget from constraint #4.
 MAX_OUTPUT_TOKENS = 4096
 
-#: Truncation applied to a tool result before it goes back into the messages.
-MAX_TOOL_RESULT_CHARS = 4000
+#: Truncation applied to one tool result before it goes back into the messages.
+MAX_TOOL_RESULT_CHARS = 1_500
+
+#: Cumulative ceiling on tool-result text across the whole cycle. Per-result
+#: truncation alone does not bound the loop: six iterations of parallel calls
+#: would still be tens of thousands of characters, and every one of them is
+#: input tokens on the next request. Past this, results are replaced by a short
+#: note — the loop stays bounded by construction rather than by the budget
+#: assertion firing and failing the cycle.
+#: Measured, not guessed: dense JSON (bar data, prices) tokenizes at roughly
+#: 1.5 chars per token, so this is ~2,700 tokens — which is what fits beside a
+#: worst-case state block inside MAX_PROMPT_TOKENS.
+MAX_TOTAL_TOOL_RESULT_CHARS = 4_000
 
 
 class ContextBudgetExceeded(RuntimeError):
@@ -124,6 +135,7 @@ class AnthropicAgent:
 
         tc = ToolContext(conn=self.conn, broker=self.broker, ctx=ctx, config=self.config)
         tool_calls: list[dict[str, Any]] = []
+        tool_result_chars = 0
         prompt_tokens = completion_tokens = 0
         peak_prompt_tokens = 0
         final_text = ""
@@ -165,6 +177,17 @@ class AnthropicAgent:
                 text, is_error = dispatch(tc, block.name, args)
                 if len(text) > MAX_TOOL_RESULT_CHARS:
                     text = text[:MAX_TOOL_RESULT_CHARS] + "…(truncated)"
+                if tool_result_chars + len(text) > MAX_TOTAL_TOOL_RESULT_CHARS:
+                    log.warning(
+                        "tool_result_budget_exhausted",
+                        extra={"cycle_id": ctx.cycle_id, "tool": block.name},
+                    )
+                    text = (
+                        "error: this cycle's tool-output budget is exhausted. "
+                        "Decide with what you already have, or end your turn."
+                    )
+                    is_error = True
+                tool_result_chars += len(text)
                 tool_calls.append(
                     {
                         "iteration": iteration,

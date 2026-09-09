@@ -149,3 +149,18 @@ def test_the_agent_cannot_change_its_own_risk_config() -> None:
     source = (SRC / "tools.py").read_text()
     assert not re.search(r"\btc\.config\s*=", source)
     assert not re.search(r"\bconfig\.\w+\s*=", source)
+
+
+def test_the_test_double_implements_the_whole_broker_protocol() -> None:
+    """A fake missing a method makes tests pass that would fail in production."""
+    from tests.fakes import FakeBroker
+    from trader.broker import AlpacaBroker, Broker
+
+    required = {
+        name
+        for name in dir(Broker)
+        if not name.startswith("_") and callable(getattr(Broker, name, None))
+    }
+    for implementation in (FakeBroker, AlpacaBroker):
+        missing = {m for m in required if not hasattr(implementation, m)}
+        assert not missing, f"{implementation.__name__} is missing {sorted(missing)}"

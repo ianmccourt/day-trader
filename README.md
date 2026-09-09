@@ -188,13 +188,20 @@ system, messages, and tools; a local estimate that drifts from the server's
 count would make the assertion meaningless. Over budget raises
 `ContextBudgetExceeded` and the cycle aborts *before* the API call.
 
-Measured on live runs against the paper account:
+Measured, not estimated. Live runs against the paper account, plus a
+worst-case synthetic state with every section at its cap:
 
 | | tokens |
 | --- | --- |
-| Simple cycle, no tools | 2,019-2,538 |
-| Three tool calls over three round trips (peak) | 3,062 |
+| Simple cycle, no tools (live) | 2,019-2,538 |
+| Three tool calls over three round trips, live (peak) | 3,062 |
+| Worst case: 25 positions, 20 theses, 30 decisions | 4,172 |
+| ...plus a fully-spent tool-result budget | 6,824 |
+| ...adversarial (800 repeated chars per thesis) | 8,280 |
 | Budget | 10,000 |
+
+Every variable-length section is capped **by bytes, not just by count** — see
+"Long horizons" below for why that distinction cost a bug.
 
 Every cycle logs its own `peak_prompt_tokens` alongside the budget in
 `cycles.full_prompt`, so drift is visible without re-running anything.
@@ -266,6 +273,61 @@ and records `final_status`, `filled_qty`, `filled_avg_price`, `filled_at` on the
 decision row. Orders still working are left alone for a later run.
 
 
+## Long horizons
+
+The design goal is that cycle 1,000 costs what cycle 1 cost. Measured over
+1,560 cycles (26/day x 60 trading days, roughly three months) with theses
+accumulating the whole way:
+
+| | |
+| --- | --- |
+| Rendered prompt, cycle 100 -> 1,560 | 3,496 -> 4,787 chars |
+| Spread across cycles 101-1,560 | 1,289 chars |
+| Peak RSS growth | 2.8 MB |
+| SQLite growth | ~7 KB/cycle -> ~45 MB/year at 15-min cadence |
+| API cost | ~$0.025/cycle -> ~$0.65/day, ~$165/year |
+
+### The bug this found
+
+The Phase 1 flatness claim was **wrong**, and the test that "proved" it was
+too weak. It accumulated only `decisions`, which are capped by count. It never
+accumulated `theses` — and `MAX_RENDERED_THESES` capped how many theses were
+rendered, not how many *bytes* they were worth. A thesis rationale is up to 800
+chars and its invalidation condition had no cap at all, so twenty verbose
+theses were ~32,000 chars of prompt, and the same soak that "proved" flatness
+showed the context growing 1,024 -> 10,607 chars over 500 cycles.
+
+That would not have lost money — the token assertion fails closed, so cycles
+would have errored out rather than silently overspending — but it would have
+stopped the harness dead a few weeks in.
+
+Fixed by capping every variable-length section by bytes:
+
+- per-thesis rationale and invalidation truncated **in the rendering only**;
+  `get_theses` still returns the full stored text, which is what that tool is for
+- `MAX_STATE_CHARS` as a hard backstop with a visible marker and a logged
+  warning, so a future uncapped section shows up instead of quietly spending
+  the budget
+- `MAX_TOTAL_TOOL_RESULT_CHARS`, a cumulative ceiling across the cycle.
+  Per-result truncation alone does not bound the loop: six iterations of
+  parallel calls is still tens of thousands of characters, every one of them
+  input tokens on the next request. Past the ceiling the model gets a short
+  note explaining why, not silence.
+
+All three sizes came from measured `count_tokens` output, not from guesses —
+dense JSON tokenizes at roughly 1.5 chars/token, not the ~4 you would assume.
+
+### What is still unproven
+
+- **No unattended multi-day run.** Everything above is single cycles plus
+  synthetic soaks. `trader run` has not been left going for a week.
+- **`prompts/` is read once per process** (`lru_cache`), so editing the system
+  prompt while `trader run` is live has no effect until restart.
+- **No stdout log rotation.** Redirect to a file and rotate it externally.
+- **No alerting.** A cycle that errors is logged and the loop continues, which
+  is correct, but nothing tells you it happened — check `trader cycles`.
+
+
 ## Architecture notes
 
 - **Short independent invocations, not one conversation.** APScheduler fires
@@ -301,7 +363,7 @@ Nothing was dropped or renamed. Additions:
 
 ## Tests
 
-`uv run pytest` — 203 tests, ruff clean. The structural invariants are worth
+`uv run pytest` — 211 tests, ruff clean. The structural invariants are worth
 knowing about, because they fail the build rather than relying on review:
 
 | File | Guards |
@@ -313,6 +375,7 @@ knowing about, because they fail the build rather than relying on review:
 | `test_llm.py` | tool loop, one-order rule, budget asserted every iteration |
 | `test_prompts.py` | no prompt text inline in `src/`, no strategy in the placeholder |
 | `test_evaluate.py` | FIFO matching, window boundaries, and every case the report refuses to guess |
+| `test_state.py` | the rendering stays bounded by bytes as theses accumulate |
 
 ## What has actually been run
 
