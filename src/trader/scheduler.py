@@ -11,6 +11,7 @@ import logging
 import signal
 import sqlite3
 from collections.abc import Callable
+from datetime import datetime
 from types import FrameType
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -20,7 +21,7 @@ from trader.agent import Agent
 from trader.broker import Broker
 from trader.constants import MARKET_TZ, RTH_CLOSE, RTH_OPEN
 from trader.cycle import CycleOutcome, run_cycle
-from trader.db import reconcile_orphan_cycles
+from trader.db import kill_switch_engaged, reconcile_orphan_cycles
 from trader.risk.config import RiskConfig
 
 log = logging.getLogger("trader.scheduler")
@@ -57,6 +58,7 @@ def run_scheduler(
         # if it starts happening every restart.
         log.warning("reconciled_orphan_cycles", extra={"count": orphans})
 
+    trigger = rth_trigger(cycle_minutes)
     scheduler = BlockingScheduler(timezone=MARKET_TZ)
 
     def job() -> None:
@@ -66,7 +68,7 @@ def run_scheduler(
 
     scheduler.add_job(
         job,
-        trigger=rth_trigger(cycle_minutes),
+        trigger=trigger,
         id="trading_cycle",
         name="trading_cycle",
         # A cycle must never overlap itself, and a machine that was asleep
@@ -83,11 +85,17 @@ def run_scheduler(
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    # Include the next fire time: started outside RTH the loop logs nothing
+    # until the session opens, and "waiting" needs to be distinguishable from
+    # "hung" without attaching a debugger.
+    next_fire = trigger.get_next_fire_time(None, datetime.now(MARKET_TZ))
     log.info(
         "scheduler_start",
         extra={
             "cycle_minutes": cycle_minutes,
             "risk_config": risk_config.source,
+            "next_cycle": next_fire.isoformat() if next_fire else None,
+            "kill_switch": kill_switch_engaged(conn),
             "window": (
                 f"{RTH_OPEN[0]:02d}:{RTH_OPEN[1]:02d}-"
                 f"{RTH_CLOSE[0]:02d}:{RTH_CLOSE[1]:02d} ET"

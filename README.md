@@ -44,6 +44,113 @@ dependency). Loading is strict — an unknown or misspelled key is a fatal error
 because a typo that silently left a limit at its default is the worst thing this
 file could do.
 
+## Running and monitoring
+
+### Start it
+
+```bash
+mkdir -p logs
+nohup uv run trader run >> logs/trader.jsonl 2>&1 &
+echo $! > logs/trader.pid
+```
+
+`trader run` blocks. It handles SIGINT and SIGTERM cleanly — the in-flight
+cycle finishes, the DB is consistent either way, and anything left `running`
+is reconciled to `interrupted` on the next start.
+
+```bash
+kill -TERM $(cat logs/trader.pid)     # graceful stop
+```
+
+Startup logs the next fire time and the kill-switch state, so a loop started
+outside market hours is visibly waiting rather than hung:
+
+```json
+{"msg":"scheduler_start","cycle_minutes":15,"risk_config":"risk.toml",
+ "next_cycle":"2026-09-10T09:00:00-04:00","kill_switch":false,"window":"09:30-16:00 ET"}
+```
+
+### Watch it
+
+Logs are one JSON object per line, so `jq` works directly:
+
+```bash
+tail -f logs/trader.jsonl | jq -c '{ts,msg,cycle_id,status,action,error}'
+```
+
+```bash
+jq -c 'select(.level=="ERROR" or .level=="WARNING")' logs/trader.jsonl
+```
+
+The events worth knowing by name:
+
+| `msg` | meaning |
+| --- | --- |
+| `cycle_start` / `cycle_end` | every cycle, with status and duration |
+| `order_submitted` | an order reached the broker |
+| `order_rejected` | the risk layer stopped one, with the checks that fired |
+| `broker_error` / `agent_error` | the cycle failed; the loop continues |
+| `kill_switch_engaged` | halted, no broker calls made |
+| `state_render_truncated` | a state section grew past its cap — investigate |
+| `tool_result_budget_exhausted` | the model over-used tools this cycle |
+| `reconciled_orphan_cycles` | expected once after an unclean shutdown, not routinely |
+
+### Check on it
+
+```bash
+uv run trader status                  # today, reconstructed from the DB
+uv run trader cycles --limit 30       # one line per cycle
+uv run trader rejections              # which checks are firing, and why
+uv run trader show <cycle_id>         # the full prompt and response
+```
+
+`trader status` makes no broker call, so it is safe to run while the loop is
+live. So is everything else in that list.
+
+### Stop it
+
+```bash
+uv run trader kill on --note "why"    # halts trading, loop keeps running
+uv run trader kill off
+```
+
+The kill switch lives in the DB, so it survives a restart, can be thrown from
+another shell while the loop is running, and is re-read immediately before
+every order — not taken from the cycle context. There is no override.
+`kill -TERM` stops the process; the kill switch stops the *trading*.
+
+### End of day
+
+```bash
+uv run trader reconcile               # read fills back from the broker
+uv run trader evaluate --start 2026-09-14 --end 2026-09-18
+```
+
+### What to actually watch for
+
+- **`error` cycles in `trader cycles`.** One is a transient broker blip. Several
+  in a row is a real problem — the loop keeps going either way, and nothing
+  alerts you.
+- **`orders_today` climbing toward `max_orders_per_day`.** Visible in
+  `trader status` and in every prompt.
+- **`max_daily_loss` in `trader rejections`.** That one latches for the rest of
+  the day; an intraday recovery does not clear it.
+- **`state_render_truncated`.** Should never appear. If it does, a section grew
+  past its cap and the context budget is at risk.
+- **`reconciled_orphan_cycles` on every start.** Means the process is dying
+  uncleanly rather than being stopped.
+
+### Gaps you should know about
+
+- **No log rotation.** Redirect to a file and rotate it yourself
+  (`newsyslog`/`logrotate`), or the file grows unbounded.
+- **No alerting.** Errors are logged, not pushed. Check `trader cycles`.
+- **No supervision.** If the process dies, nothing restarts it. A launchd
+  `KeepAlive` job would fix that; nothing in this repo does it for you.
+- **`prompts/` is read once per process.** Editing the system prompt while the
+  loop is live has no effect until restart.
+
+
 ## Phase 1 — loop without intelligence
 
 The agent is a stub that always returns `no_action`; there is no order
