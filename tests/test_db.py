@@ -14,6 +14,7 @@ from trader.db import (
     kill_switch_engaged,
     last_cycle,
     open_cycle,
+    orders_for_cycle,
     orders_since,
     reconcile_orphan_cycles,
     record_decision,
@@ -99,6 +100,7 @@ def test_orders_since_counts_only_submitted_orders(conn: sqlite3.Connection) -> 
     )
     assert orders_since(conn, utcnow() - timedelta(hours=1)) == 1
     assert orders_since(conn, utcnow() + timedelta(minutes=1)) == 0
+    assert orders_for_cycle(conn, cycle_id) == 1
 
 
 def test_risk_events_persist_the_proposal(conn: sqlite3.Connection) -> None:

@@ -32,6 +32,11 @@ class Proposal:
     #: could understate notional and walk straight through the notional caps.
     reference_price: float
     reasoning: str = ""
+    #: Optional protective prices, submitted with the entry as an Alpaca OTO
+    #: (stop or take-profit alone) or bracket (both). Evaluated by the risk
+    #: layer; never trusted as a way around notional caps.
+    stop_price: float | None = None
+    take_profit_price: float | None = None
 
     @property
     def notional(self) -> float:
@@ -53,6 +58,8 @@ class Proposal:
             "reference_price": self.reference_price,
             "notional": self.notional if self.is_finite else None,
             "reasoning": self.reasoning,
+            "stop_price": self.stop_price,
+            "take_profit_price": self.take_profit_price,
         }
 
 
@@ -77,6 +84,7 @@ class RiskState:
     positions: dict[str, PositionState] = field(default_factory=dict)
     orders_last_hour: int = 0
     orders_today: int = 0
+    orders_this_cycle: int = 0
     #: True once max_daily_loss has fired today. Latched in the DB by the
     #: execution layer so an intraday recovery does not re-enable trading.
     daily_loss_halted: bool = False
@@ -125,5 +133,6 @@ class RiskState:
             },
             orders_last_hour=ctx.orders_last_hour,
             orders_today=ctx.orders_today,
+            orders_this_cycle=ctx.orders_this_cycle,
             daily_loss_halted=daily_loss_halted,
         )

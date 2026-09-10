@@ -11,8 +11,14 @@ from __future__ import annotations
 
 from zoneinfo import ZoneInfo
 
-#: The only broker endpoint this repo may ever talk to.
+#: The only Alpaca endpoint this repo may ever talk to.
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+
+#: `TRADER_BROKER` values. `paper` is the only default. This is a product
+#: switch (Alpaca paper vs Robinhood Agentic MCP), not an Alpaca URL flip.
+BROKER_PAPER = "paper"
+BROKER_ROBINHOOD_AGENTIC = "robinhood_agentic"
+BROKER_MODES = frozenset({BROKER_PAPER, BROKER_ROBINHOOD_AGENTIC})
 
 #: Guard value. `tests/test_paper_only.py` greps the source tree for this and
 #: fails the build if it appears anywhere outside a test or a comment.

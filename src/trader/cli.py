@@ -11,9 +11,9 @@ from typing import Any
 
 from trader import logging_setup
 from trader.agent import Agent, StubAgent
-from trader.broker import AlpacaBroker, Broker
+from trader.broker import AlpacaBroker, Broker, BrokerError
+from trader.brokers import broker_endpoint, make_broker
 from trader.config import MissingCredential, Settings, load_settings
-from trader.constants import ALPACA_PAPER_BASE_URL
 from trader.cycle import run_cycle
 from trader.db import (
     KILL_SWITCH,
@@ -43,7 +43,7 @@ from trader.state import trading_day_for
 
 def _open(settings: Settings) -> tuple[sqlite3.Connection, Broker]:
     conn = connect(settings.db_path)
-    broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key)
+    broker = make_broker(settings)
     return conn, broker
 
 
@@ -128,7 +128,8 @@ def cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
     ).fetchall()
     out: dict[str, Any] = {
         "db": str(settings.db_path),
-        "broker_base_url": ALPACA_PAPER_BASE_URL,
+        "broker": settings.broker,
+        "broker_base_url": broker_endpoint(settings),
         "trading_day": day,
         "kill_switch": kill_switch_engaged(conn),
         "cycles_today": len(rows),
@@ -188,6 +189,7 @@ def cmd_risk(settings: Settings, args: argparse.Namespace) -> int:
                 "max_daily_loss": config.max_daily_loss,
                 "max_orders_per_hour": config.max_orders_per_hour,
                 "max_orders_per_day": config.max_orders_per_day,
+                "max_orders_per_cycle": config.max_orders_per_cycle,
                 "symbol_allowlist": sorted(config.symbol_allowlist),
                 "regular_trading_hours_only": config.regular_trading_hours_only,
                 "allow_shorts": config.allow_shorts,
@@ -284,6 +286,56 @@ def cmd_kill(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rh_login(settings: Settings, _args: argparse.Namespace) -> int:
+    """Interactive OAuth. `trader run` cannot complete a browser login."""
+    from trader.robinhood_mcp import interactive_login
+
+    try:
+        info = interactive_login(settings.robinhood_token_path)
+    except (BrokerError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"token store: {settings.robinhood_token_path}")
+    print("discovered tools:")
+    for name in info["tools"]:
+        print(f"  {name}")
+    print("mapped capabilities:")
+    for cap, tool in info["capabilities"].items():
+        print(f"  {cap}: {tool or '(none)'}")
+    missing = [cap for cap, tool in info["capabilities"].items() if tool is None]
+    if missing:
+        print(
+            "warning: unmapped capabilities (those calls will fail closed): "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
+    return 0
+
+
+def cmd_dashboard(settings: Settings, args: argparse.Namespace) -> int:
+    """Local loopback panel. Does not submit orders; start/stop the loop instead."""
+    from trader.dashboard import DashboardApp, LoopProcess, serve
+
+    run_argv: list[str] = []
+    if args.stub:
+        run_argv.append("--stub")
+    if args.no_thinking:
+        run_argv.append("--no-thinking")
+    run_argv.extend(["--effort", args.effort, "--risk-config", args.risk_config])
+    serve(
+        DashboardApp(
+            settings,
+            loop=LoopProcess(),
+            risk_config_path=Path(args.risk_config),
+            run_argv=run_argv,
+        ),
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trader", description=__doc__)
     p.add_argument("--text-logs", action="store_true", help="human-readable logs, not JSON lines")
@@ -354,6 +406,17 @@ def build_parser() -> argparse.ArgumentParser:
     kill.add_argument("--note", default=None)
     kill.set_defaults(func=cmd_kill)
 
+    dash = sub.add_parser("dashboard", help="local browser panel: start, stop, kill, monitor")
+    dash.add_argument("--host", default="127.0.0.1")
+    dash.add_argument("--port", type=int, default=8765)
+    dash.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    dash.set_defaults(func=cmd_dashboard)
+
+    sub.add_parser(
+        "rh-login",
+        help="authorize the Robinhood Agentic MCP adapter (opens a browser)",
+    ).set_defaults(func=cmd_rh_login)
+
     return p
 
 
@@ -362,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     needs_broker = args.command in {"run", "cycle", "reconcile"}
     try:
         settings = load_settings(require_broker=needs_broker)
-    except MissingCredential as exc:
+    except (MissingCredential, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     logging_setup.configure(settings.log_level, json_lines=not args.text_logs)

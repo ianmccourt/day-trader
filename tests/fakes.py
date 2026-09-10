@@ -87,15 +87,46 @@ class FakeBroker:
             filled_at=utcnow(),
         )
 
-    def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt:
+    def submit_order(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        side: str,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> OrderReceipt:
         self._check("submit_order")
-        self.submitted.append({"symbol": symbol, "qty": qty, "side": side})
+        record: dict[str, Any] = {"symbol": symbol, "qty": qty, "side": side}
+        if stop_price is not None:
+            record["stop_price"] = stop_price
+        if take_profit_price is not None:
+            record["take_profit_price"] = take_profit_price
+        self.submitted.append(record)
+        self._apply_fill(symbol, qty, side)
         return OrderReceipt(
             order_id=f"fake-order-{len(self.submitted)}",
             status="accepted",
             submitted_at=utcnow(),
-            filled_qty=0.0,
+            filled_qty=qty,
         )
+
+    def _apply_fill(self, symbol: str, qty: float, side: str) -> None:
+        """Paper fills immediately so a later order in the same cycle sees the book."""
+        signed = qty if side == "buy" else -qty
+        price = self.prices.get(symbol.upper(), self.default_price)
+        existing = next((p for p in self.positions if p["symbol"] == symbol.upper()), None)
+        if existing is None:
+            self.positions.append(position(symbol.upper(), signed, price, price))
+            return
+        new_qty = float(existing["qty"]) + signed
+        if abs(new_qty) < 1e-9:
+            self.positions = [p for p in self.positions if p["symbol"] != symbol.upper()]
+            return
+        existing["qty"] = new_qty
+        last = float(existing.get("current_price") or price)
+        existing["market_value"] = new_qty * last
+        existing["unrealized_pl"] = new_qty * (last - float(existing["avg_price"]))
 
 
 def position(

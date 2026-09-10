@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -42,9 +43,10 @@ def broker():
 
 
 def make(conn, broker, client, **kwargs):
+    config = kwargs.pop("config", CONFIG)
     cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
     ctx = build_cycle_context(conn, broker, cycle_id=cycle_id)
-    agent = AnthropicAgent(conn, broker, CONFIG, client=client, **kwargs)
+    agent = AnthropicAgent(conn, broker, config, client=client, **kwargs)
     return agent, ctx
 
 
@@ -219,7 +221,8 @@ def test_only_one_order_may_be_proposed_per_cycle(conn, broker) -> None:
 
     assert len(broker.submitted) == 1
     assert result.tool_calls[1]["is_error"] is True
-    assert "already proposed an order" in result.tool_calls[1]["result"]
+    assert "already proposed" in result.tool_calls[1]["result"]
+    assert "at most 1" in result.tool_calls[1]["result"]
 
 
 def test_two_orders_in_one_assistant_turn_still_yield_one(conn, broker) -> None:
@@ -240,6 +243,94 @@ def test_two_orders_in_one_assistant_turn_still_yield_one(conn, broker) -> None:
 
     assert len(broker.submitted) == 1
     assert result.tool_calls[1]["is_error"] is True
+
+
+def test_two_orders_execute_when_the_per_cycle_cap_allows(conn, broker) -> None:
+    order = (
+        WRITE_TOOL,
+        {
+            "action": "buy",
+            "symbol": "AAPL",
+            "qty": 1,
+            "reasoning": "r",
+            "invalidation_condition": "i",
+        },
+    )
+    client = FakeAnthropic([tool_response(order, order), text_response("done")])
+    agent, ctx = make(conn, broker, client, config=replace(CONFIG, max_orders_per_cycle=3))
+    result = agent.run(ctx)
+
+    assert len(broker.submitted) == 2
+    assert not any(t["is_error"] for t in result.tool_calls if t["name"] == WRITE_TOOL)
+    assert len(result.executions) == 2
+
+
+def test_the_second_order_sees_the_fill_from_the_first(conn, broker) -> None:
+    """40 sh @ $100 = $4,000; a further 20 would be $6,000, over the $5,000 cap."""
+    first = (
+        WRITE_TOOL,
+        {
+            "action": "buy",
+            "symbol": "AAPL",
+            "qty": 40,
+            "reasoning": "scale in",
+            "invalidation_condition": "i",
+        },
+    )
+    second = (
+        WRITE_TOOL,
+        {
+            "action": "buy",
+            "symbol": "AAPL",
+            "qty": 20,
+            "reasoning": "too much",
+            "invalidation_condition": "i",
+        },
+    )
+    client = FakeAnthropic([tool_response(first, second), text_response("done")])
+    agent, ctx = make(conn, broker, client, config=replace(CONFIG, max_orders_per_cycle=3))
+    result = agent.run(ctx)
+
+    assert broker.submitted == [{"symbol": "AAPL", "qty": 40.0, "side": "buy"}]
+    payload = json.loads(result.tool_calls[1]["result"])
+    assert payload["approved"] is False
+    assert "max_position_notional" in payload["failed_checks"]
+
+
+def test_a_stop_rides_along_with_an_executed_order(conn, broker) -> None:
+    client = FakeAnthropic(
+        [
+            tool_response(
+                (
+                    WRITE_TOOL,
+                    {
+                        "action": "buy",
+                        "symbol": "AAPL",
+                        "qty": 10,
+                        "stop_price": 95.0,
+                        "take_profit_price": 110.0,
+                        "reasoning": "with protection",
+                        "invalidation_condition": "stop hits",
+                    },
+                )
+            ),
+            text_response("Protected."),
+        ]
+    )
+    agent, ctx = make(conn, broker, client)
+    result = agent.run(ctx)
+
+    assert broker.submitted == [
+        {
+            "symbol": "AAPL",
+            "qty": 10.0,
+            "side": "buy",
+            "stop_price": 95.0,
+            "take_profit_price": 110.0,
+        }
+    ]
+    assert "stop=95" in result.executions[0].as_model_message()
+    assert "take_profit=110" in result.executions[0].as_model_message()
 
 
 def test_selling_a_whole_position_closes_its_thesis(conn, broker) -> None:

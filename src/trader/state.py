@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from trader.broker import Broker, Clock
 from trader.constants import MARKET_TZ
-from trader.db import kill_switch_engaged, orders_since, utcnow
+from trader.db import kill_switch_engaged, orders_for_cycle, orders_since, utcnow
 
 #: Hard caps on anything variable-length that reaches the prompt. These are the
 #: only reason context stays flat over a long session.
@@ -65,6 +65,7 @@ class CycleContext:
     recent_decisions: list[dict[str, Any]]
     orders_last_hour: int
     orders_today: int
+    orders_this_cycle: int
     kill_switch: bool
     equity_delta_today: float | None
     previous_cycle: dict[str, Any] | None = None
@@ -138,9 +139,41 @@ def build_cycle_context(
         recent_decisions=list(reversed(recent_decisions)),
         orders_last_hour=orders_since(conn, now - timedelta(hours=1)),
         orders_today=orders_since(conn, _start_of_trading_day(now)),
+        orders_this_cycle=orders_for_cycle(conn, cycle_id),
         kill_switch=kill_switch_engaged(conn),
         equity_delta_today=equity_delta,
         previous_cycle=dict(previous) if previous else None,
+        notes=(
+            [f"{len(positions) - MAX_RENDERED_POSITIONS} further positions not rendered"]
+            if len(positions) > MAX_RENDERED_POSITIONS
+            else []
+        ),
+    )
+
+
+def refresh_cycle_context(
+    conn: sqlite3.Connection,
+    broker: Broker,
+    ctx: CycleContext,
+) -> CycleContext:
+    """Re-read broker book and rate counters after an in-cycle fill.
+
+    CycleContext is frozen. Each subsequent order in a multi-order cycle must
+    see the position the previous order just produced, or salami-slicing
+    inside one wake would walk around max_position_notional.
+    """
+    account = broker.get_account()
+    positions = broker.get_positions()
+    last_equity = account.get("last_equity")
+    equity_delta = None if last_equity in (None, 0) else account["equity"] - last_equity
+    return replace(
+        ctx,
+        account=account,
+        positions=positions[:MAX_RENDERED_POSITIONS],
+        orders_last_hour=orders_since(conn, ctx.now - timedelta(hours=1)),
+        orders_today=orders_since(conn, _start_of_trading_day(ctx.now)),
+        orders_this_cycle=orders_for_cycle(conn, ctx.cycle_id),
+        equity_delta_today=equity_delta,
         notes=(
             [f"{len(positions) - MAX_RENDERED_POSITIONS} further positions not rendered"]
             if len(positions) > MAX_RENDERED_POSITIONS
@@ -226,6 +259,7 @@ def render_state(ctx: CycleContext) -> str:
         "## Rate usage",
         f"orders_last_hour: {ctx.orders_last_hour}",
         f"orders_today: {ctx.orders_today}",
+        f"orders_this_cycle: {ctx.orders_this_cycle}",
     ]
     if ctx.previous_cycle:
         lines += [

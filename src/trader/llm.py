@@ -29,9 +29,9 @@ from trader.tools import TOOL_SCHEMAS, ToolContext, dispatch
 
 log = logging.getLogger("trader.llm")
 
-#: Ceiling on loop iterations. The model can read a few times and write once;
-#: anything beyond this is a loop, not deliberation.
-MAX_TOOL_ITERATIONS = 6
+#: Ceiling on loop iterations. The model can read a few times and write several
+#: orders; anything beyond this is a loop, not deliberation.
+MAX_TOOL_ITERATIONS = 8
 
 #: Small on purpose. Output becomes input on the next iteration, so a generous
 #: cap here spends the prompt budget from constraint #4.

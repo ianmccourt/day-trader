@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -79,4 +80,37 @@ def test_the_parser_exposes_the_documented_commands() -> None:
         "reconcile",
         "evaluate",
         "kill",
+        "dashboard",
+        "rh-login",
     }
+
+
+def test_unknown_broker_mode_is_fatal(env, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("TRADER_BROKER", "alpaca_live")
+    assert main(["status"]) == 2
+    err = capsys.readouterr().err
+    assert "TRADER_BROKER" in err
+    assert "alpaca_live" in err
+
+
+def test_robinhood_mode_without_tokens_stops_a_trading_command(env, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("TRADER_BROKER", "robinhood_agentic")
+    monkeypatch.setenv("TRADER_ROBINHOOD_TOKEN_PATH", str(env.parent / "missing-rh.json"))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    assert main(["cycle"]) == 2
+    assert "rh-login" in capsys.readouterr().err
+
+
+def test_robinhood_mode_does_not_require_alpaca_keys_for_status(
+    env, monkeypatch, tmp_path, capsys
+) -> None:
+    token = tmp_path / "rh.json"
+    token.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("TRADER_BROKER", "robinhood_agentic")
+    monkeypatch.setenv("TRADER_ROBINHOOD_TOKEN_PATH", str(token))
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    assert main(["status"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["broker"] == "robinhood_agentic"

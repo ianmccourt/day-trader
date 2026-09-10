@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.fakes import FakeBroker, position
+from tests.fakes import FakeBroker
 from trader.db import KILL_SWITCH, connect, open_cycle, set_flag, utcnow
 from trader.execution import build_proposal, daily_halt_flag, place_order
 from trader.risk.config import RiskConfig
@@ -45,8 +45,20 @@ def ctx_for(conn, broker, **_):
     return build_cycle_context(conn, broker, cycle_id=cycle_id)
 
 
-def p(action: str, symbol: str, qty: float, price: float = 100.0) -> Proposal:
-    return Proposal(action=action, symbol=symbol, qty=qty, reference_price=price)  # type: ignore[arg-type]
+def p(
+    action: str,
+    symbol: str,
+    qty: float,
+    price: float = 100.0,
+    stop_price: float | None = None,
+) -> Proposal:
+    return Proposal(
+        action=action,  # type: ignore[arg-type]
+        symbol=symbol,
+        qty=qty,
+        reference_price=price,
+        stop_price=stop_price,
+    )
 
 
 # Each entry: (label, proposal, the check that must fire).
@@ -64,6 +76,7 @@ MALICIOUS: list[tuple[str, Proposal, str]] = [
     ("naked short", p("sell", "AAPL", 500), "no_unintended_short"),
     ("empty symbol", p("buy", "", 1), "proposal_sanity"),
     ("padded symbol", p("buy", " AAPL ", 1), "proposal_sanity"),
+    ("stop above a long", p("buy", "AAPL", 10, stop_price=110.0), "protective_exits"),
 ]
 
 
@@ -127,11 +140,36 @@ def test_salami_slicing_cannot_exceed_the_position_cap(conn, broker) -> None:
         result = place_order(conn, broker, ctx, p("buy", "AAPL", 10), generous)
         if result.executed:
             filled += 10
-            # The fake broker does not fill; reflect the position ourselves so
-            # the next cycle sees what a real broker would have given us.
-            broker.positions = [position("AAPL", filled, 100.0, 100.0)]
     assert filled == 50  # $5,000 at $100, exactly max_position_notional
     assert len(broker.submitted) == 5
+
+
+def test_salami_inside_one_cycle_is_still_capped(conn, broker) -> None:
+    """A multi-order cycle must re-read the book between proposals."""
+    generous = replace(
+        CONFIG,
+        max_orders_per_hour=1_000,
+        max_orders_per_day=1_000,
+        max_orders_per_cycle=20,
+    )
+    ctx = ctx_for(conn, broker)
+    filled = 0
+    for _ in range(20):
+        result = place_order(conn, broker, ctx, p("buy", "AAPL", 10), generous)
+        if result.executed:
+            filled += 10
+    assert filled == 50
+    assert len(broker.submitted) == 5
+
+
+def test_an_approved_order_can_carry_a_broker_stop(conn, broker) -> None:
+    ctx = ctx_for(conn, broker)
+    result = place_order(conn, broker, ctx, p("buy", "AAPL", 10, stop_price=95.0), CONFIG)
+    assert result.executed
+    assert broker.submitted == [
+        {"symbol": "AAPL", "qty": 10.0, "side": "buy", "stop_price": 95.0}
+    ]
+    assert "stop=95" in result.as_model_message()
 
 
 def test_kill_switch_thrown_mid_cycle_still_blocks_the_order(conn, broker) -> None:

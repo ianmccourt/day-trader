@@ -20,6 +20,8 @@ max_daily_loss = 2000.0
 # Rolling-window order limits, counted from orders this harness submitted.
 max_orders_per_hour = 6
 max_orders_per_day = 20
+# Keep the original one-proposal-per-cycle behaviour.
+max_orders_per_cycle = 1
 
 [universe]
 # Explicit allowlist. Nothing outside this list is tradeable, ever.

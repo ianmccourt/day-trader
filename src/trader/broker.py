@@ -16,8 +16,8 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
 
 from trader.constants import ALPACA_PAPER_BASE_URL
 from trader.db import iso, utcnow
@@ -80,7 +80,15 @@ class Broker(Protocol):
     def get_positions(self) -> list[dict[str, Any]]: ...
     def get_latest_price(self, symbol: str) -> float: ...
     def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]: ...
-    def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt: ...
+    def submit_order(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        side: str,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> OrderReceipt: ...
     def get_order(self, order_id: str) -> OrderFill: ...
 
 
@@ -215,23 +223,47 @@ class AlpacaBroker:
             for bar in bars.data.get(symbol, [])[-limit:]
         ]
 
-    def submit_order(self, *, symbol: str, qty: float, side: str) -> OrderReceipt:
+    def submit_order(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        side: str,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> OrderReceipt:
         """The only mutating broker call in the repo.
 
         Do not call this directly. `trader.execution.place_order` is the sole
         caller and runs the risk layer first; a second caller would be a
         bypass, which is why test_no_bypass.py checks for one.
+
+        A stop and/or take-profit rides on the same request as an Alpaca OTO
+        (one exit) or bracket (both). They rest at the broker between cycles.
         """
         if side not in ("buy", "sell"):
             raise BrokerError(f"side must be 'buy' or 'sell', got {side!r}")
-        request = MarketOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": OrderSide.BUY if side == "buy" else OrderSide.SELL,
             # DAY, never GTC: an order that outlives the session would execute
             # against a state no cycle ever evaluated.
-            time_in_force=TimeInForce.DAY,
-        )
+            "time_in_force": TimeInForce.DAY,
+        }
+        if stop_price is not None or take_profit_price is not None:
+            kwargs["order_class"] = (
+                OrderClass.BRACKET
+                if stop_price is not None and take_profit_price is not None
+                else OrderClass.OTO
+            )
+            if stop_price is not None:
+                kwargs["stop_loss"] = StopLossRequest(stop_price=round(stop_price, 2))
+            if take_profit_price is not None:
+                kwargs["take_profit"] = TakeProfitRequest(
+                    limit_price=round(take_profit_price, 2)
+                )
+        request = MarketOrderRequest(**kwargs)
         try:
             order = self._client.submit_order(request)
         except Exception as exc:

@@ -23,7 +23,7 @@ from trader.constants import MAX_THESIS_RATIONALE_CHARS
 from trader.execution import build_proposal, place_order
 from trader.risk.checks import CHECK_NAMES
 from trader.risk.config import RiskConfig
-from trader.state import CycleContext
+from trader.state import CycleContext, refresh_cycle_context
 
 log = logging.getLogger("trader.tools")
 
@@ -45,9 +45,9 @@ class ToolContext:
     broker: Broker
     ctx: CycleContext
     config: RiskConfig
-    #: Set once `place_order` has been called. The spec allows at most one
-    #: write proposal per cycle, and this is what enforces it.
-    order_attempted: bool = False
+    #: Count of place_order attempts this cycle, including rejections. Caps
+    #: the tool loop; the risk layer separately caps *submitted* orders.
+    orders_attempted: int = 0
     executions: list[Any] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -66,12 +66,14 @@ def _get_risk_limits(tc: ToolContext, _args: dict[str, Any]) -> dict[str, Any]:
         "max_daily_loss": c.max_daily_loss,
         "max_orders_per_hour": c.max_orders_per_hour,
         "max_orders_per_day": c.max_orders_per_day,
+        "max_orders_per_cycle": c.max_orders_per_cycle,
         "symbol_allowlist": sorted(c.symbol_allowlist),
         "regular_trading_hours_only": c.regular_trading_hours_only,
         "allow_shorts": c.allow_shorts,
         "checks_that_will_run": list(CHECK_NAMES),
         "orders_used_this_hour": tc.ctx.orders_last_hour,
         "orders_used_today": tc.ctx.orders_today,
+        "orders_used_this_cycle": tc.ctx.orders_this_cycle,
     }
 
 
@@ -136,16 +138,26 @@ def _get_recent_decisions(tc: ToolContext, args: dict[str, Any]) -> list[dict[st
 # --- the one write tool ----------------------------------------------------
 
 
+def _optional_price(args: dict[str, Any], key: str) -> float | None:
+    raw = args.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ToolError(f"{key} must be a number, got {raw!r}") from None
+    return value
+
+
 def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """The only tool that changes anything. Routes through the risk layer."""
-    if tc.order_attempted:
-        # The spec allows at most one write proposal per cycle. Refused as a
-        # tool result rather than an exception, so the model can wrap up.
+    limit = tc.config.max_orders_per_cycle
+    if tc.orders_attempted >= limit:
         raise ToolError(
-            "you have already proposed an order this cycle; at most one is allowed. "
-            "End your turn."
+            f"you have already proposed {tc.orders_attempted} order(s) this cycle; "
+            f"at most {limit} are allowed. End your turn."
         )
-    tc.order_attempted = True
+    tc.orders_attempted += 1
 
     action = str(args.get("action", "")).strip().lower()
     symbol = str(args.get("symbol", "")).strip().upper()
@@ -158,7 +170,13 @@ def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
     try:
         proposal = build_proposal(
-            tc.broker, action=action, symbol=symbol, qty=qty, reasoning=reasoning
+            tc.broker,
+            action=action,
+            symbol=symbol,
+            qty=qty,
+            reasoning=reasoning,
+            stop_price=_optional_price(args, "stop_price"),
+            take_profit_price=_optional_price(args, "take_profit_price"),
         )
     except BrokerError as exc:
         raise ToolError(f"could not price {symbol}: {exc}") from exc
@@ -167,6 +185,7 @@ def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     tc.executions.append(result)
 
     if result.executed:
+        tc.ctx = refresh_cycle_context(tc.conn, tc.broker, tc.ctx)
         _record_thesis(tc, proposal.symbol, action, reasoning, invalidation)
 
     return {
@@ -176,6 +195,7 @@ def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         "reference_price": proposal.reference_price,
         "notional": round(proposal.notional, 2),
         "failed_checks": [f.check for f in result.verdict.failures],
+        "orders_remaining_this_cycle": max(0, limit - tc.orders_attempted),
     }
 
 
@@ -195,8 +215,7 @@ def _record_thesis(
 
     if action == "sell":
         position = tc.ctx.position_for(symbol)
-        # Only close the thesis when the position is actually flat afterwards.
-        remaining = (position["qty"] if position else 0.0) - tc.executions[-1].proposal.qty
+        remaining = float(position["qty"]) if position else 0.0
         if existing and remaining <= 0:
             tc.conn.execute(
                 "UPDATE theses SET status = 'closed', closed_at = datetime('now'), "
@@ -307,12 +326,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": WRITE_TOOL,
         "description": (
-            "Propose one market order. This is the only tool that changes anything, "
-            "and you may call it at most once per cycle. Every proposal is evaluated "
-            "by an independent risk layer before anything reaches the broker; if a "
-            "check fails you get the rejection back and nothing is sent. On an "
-            "executed buy, `reasoning` and `invalidation_condition` are stored as the "
-            "thesis for the position and shown to future cycles."
+            "Propose one market order. This is the only tool that changes anything. "
+            "You may call it more than once per cycle, up to max_orders_per_cycle "
+            "(see get_risk_limits). Every proposal is evaluated by an independent "
+            "risk layer before anything reaches the broker; if a check fails you "
+            "get the rejection back and nothing is sent. Optional `stop_price` and "
+            "`take_profit_price` rest at the broker as an OTO or bracket until they "
+            "fill or the session ends — they are what protect a position between "
+            "cycles. On an executed buy, `reasoning` and `invalidation_condition` "
+            "are stored as the thesis for the position and shown to future cycles."
         ),
         "input_schema": {
             "type": "object",
@@ -320,6 +342,22 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "action": {"type": "string", "enum": ["buy", "sell"]},
                 "symbol": {"type": "string"},
                 "qty": {"type": "number", "exclusiveMinimum": 0},
+                "stop_price": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": (
+                        "Optional stop-loss trigger. Below entry for a long, above "
+                        "for a short. Submitted with the entry; lives at the broker."
+                    ),
+                },
+                "take_profit_price": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": (
+                        "Optional take-profit limit. Above entry for a long, below "
+                        "for a short. Submitted with the entry."
+                    ),
+                },
                 "reasoning": {
                     "type": "string",
                     "description": "Why you are placing this order. Stored verbatim.",

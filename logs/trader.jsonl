@@ -1,0 +1,9 @@
+{"ts": "2026-09-10T02:20:51.876+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_start", "cycle_minutes": 5, "risk_config": "risk.toml", "next_cycle": "2026-09-10T09:00:00-04:00", "kill_switch": false, "window": "09:30-16:00 ET"}
+{"ts": "2026-09-10T02:23:40.839+00:00", "level": "WARNING", "logger": "trader.scheduler", "msg": "shutdown_signal", "signal": "SIGTERM"}
+{"ts": "2026-09-10T02:23:40.841+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_stopped"}
+{"ts": "2026-09-10T02:23:44.058+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_start", "cycle_minutes": 5, "risk_config": "risk.toml", "next_cycle": "2026-09-10T09:00:00-04:00", "kill_switch": false, "window": "09:30-16:00 ET"}
+{"ts": "2026-09-10T02:23:46.280+00:00", "level": "WARNING", "logger": "trader.scheduler", "msg": "shutdown_signal", "signal": "SIGTERM"}
+{"ts": "2026-09-10T02:23:46.280+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_stopped"}
+{"ts": "2026-09-10T03:09:05.011+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_start", "cycle_minutes": 5, "risk_config": "risk.toml", "next_cycle": "2026-09-10T09:00:00-04:00", "kill_switch": false, "window": "09:30-16:00 ET"}
+{"ts": "2026-09-10T03:09:33.479+00:00", "level": "WARNING", "logger": "trader.scheduler", "msg": "shutdown_signal", "signal": "SIGTERM"}
+{"ts": "2026-09-10T03:09:33.480+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_stopped"}

@@ -20,6 +20,7 @@ max_total_exposure = 25000.0
 max_daily_loss = 2000.0
 max_orders_per_hour = 6
 max_orders_per_day = 20
+max_orders_per_cycle = 1
 
 [universe]
 symbol_allowlist = ["AAPL", "SPY"]
@@ -60,6 +61,8 @@ def test_shipped_configs_are_internally_coherent(path: Path) -> None:
     assert config.max_position_notional <= config.max_total_exposure
     # An hourly cap above the daily cap can never bind.
     assert config.max_orders_per_hour <= config.max_orders_per_day
+    # A per-cycle cap above the hourly cap can never bind on its own.
+    assert config.max_orders_per_cycle <= config.max_orders_per_hour
 
 
 def test_loads_a_valid_file(tmp_path: Path) -> None:

@@ -381,6 +381,16 @@ def orders_since(conn: sqlite3.Connection, since: datetime) -> int:
     return int(row["n"])
 
 
+def orders_for_cycle(conn: sqlite3.Connection, cycle_id: int) -> int:
+    """Submitted orders (those with a broker id) attributed to this cycle."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM decisions "
+        "WHERE cycle_id = ? AND broker_order_id IS NOT NULL",
+        (cycle_id,),
+    ).fetchone()
+    return int(row["n"])
+
+
 # --- flags / kill switch ---------------------------------------------------
 
 

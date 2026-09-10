@@ -39,7 +39,7 @@ loop of short, independent agent invocations with state held externally.
 APScheduler (every N min, RTH only)
   └─> build_cycle_context()      # deterministic, from DB + broker
        └─> single Anthropic API call w/ tools
-            └─> tool loop (read tools, then at most one write proposal)
+            └─> tool loop (read tools, then up to N write proposals)
                  └─> risk layer → broker OR rejection
                       └─> persist decision + full transcript
                            └─> tear down context entirely

@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Day trader · paper</title>
+  <style>
+    :root {
+      --bg: #0c0f12;
+      --panel: #14191e;
+      --line: #232a32;
+      --text: #e8edf2;
+      --muted: #8b97a4;
+      --green: #3dd68c;
+      --red: #ff5d5d;
+      --amber: #f5b942;
+      --blue: #6cb6ff;
+      --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      --sans: "SF Pro Text", system-ui, -apple-system, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 14px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0;
+      background: #0c0f12ee; backdrop-filter: blur(8px); z-index: 2;
+    }
+    h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: 0.01em; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .badge {
+      font: 11px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 4px 8px; border-radius: 999px; border: 1px solid var(--line);
+    }
+    .badge.paper { color: var(--amber); border-color: #5a4a1a; background: #2a220c; }
+    .badge.live { color: var(--red); border-color: #5a1e1e; background: #2a1010; }
+    .badge.on { color: var(--green); border-color: #1e4a34; background: #10281c; }
+    .badge.off { color: var(--muted); }
+    .badge.kill { color: var(--red); border-color: #5a1e1e; background: #2a1010; }
+    button {
+      background: #1c242c; color: var(--text); border: 1px solid var(--line);
+      border-radius: 8px; padding: 7px 12px; font: 13px var(--sans); cursor: pointer;
+    }
+    button:hover { background: #24303a; }
+    button.primary { background: #163526; border-color: #245c40; color: var(--green); }
+    button.danger { background: #2a1414; border-color: #5a2424; color: var(--red); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    main { padding: 18px 20px 40px; display: grid; gap: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    }
+    .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .card .v { font: 20px/1.2 var(--mono); margin-top: 6px; }
+    .card .s { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+    h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    td { padding: 6px 8px; border-bottom: 1px solid #1b2128; font-variant-numeric: tabular-nums; }
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover { background: #1a2128; }
+    .ok { color: var(--green); }
+    .err { color: var(--red); }
+    .warn { color: var(--amber); }
+    .muted { color: var(--muted); }
+    #toast {
+      min-height: 1.2em; color: var(--muted); font-size: 12px;
+    }
+    #toast.err { color: var(--red); }
+    #toast.ok { color: var(--green); }
+    pre.log {
+      margin: 0; max-height: 280px; overflow: auto; font: 11px/1.4 var(--mono);
+      background: #0a0d10; border-radius: 8px; padding: 10px; color: #b8c2cc;
+    }
+    .log .ERROR { color: var(--red); }
+    .log .WARNING { color: var(--amber); }
+    .pill { font: 11px var(--mono); color: var(--blue); }
+    dialog {
+      border: 1px solid var(--line); background: var(--panel); color: var(--text);
+      border-radius: 12px; width: min(720px, 92vw); padding: 16px 18px;
+    }
+    dialog::backdrop { background: #0008; }
+    dialog pre { white-space: pre-wrap; font: 12px/1.4 var(--mono); max-height: 50vh; overflow: auto; }
+    .allow { display: flex; flex-wrap: wrap; gap: 6px; }
+    .allow span { font: 11px var(--mono); background: #1c242c; padding: 3px 7px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <span id="broker-badge" class="badge paper">paper</span>
+      <h1>Day trader</h1>
+      <span id="loop-badge" class="badge off">stopped</span>
+      <span id="kill-badge" class="badge off">kill off</span>
+      <span id="toast"></span>
+    </div>
+    <div class="row">
+      <button id="btn-start" class="primary">Start loop</button>
+      <button id="btn-stop">Stop loop</button>
+      <button id="btn-kill" class="danger">Kill switch</button>
+      <button id="btn-reconcile">Reconcile fills</button>
+    </div>
+  </header>
+  <main>
+    <section class="cards" id="cards"></section>
+    <section class="card">
+      <h2>Positions</h2>
+      <div id="positions" class="muted">No snapshot yet.</div>
+    </section>
+    <section class="grid">
+      <div class="card">
+        <h2>Cycles</h2>
+        <div id="cycles"></div>
+      </div>
+      <div class="card">
+        <h2>Risk &amp; rejections</h2>
+        <div id="risk"></div>
+        <div id="rejections" style="margin-top:12px"></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Recent decisions</h2>
+      <div id="decisions"></div>
+    </section>
+    <section class="card">
+      <h2>Log tail</h2>
+      <pre class="log" id="log"></pre>
+    </section>
+  </main>
+  <dialog id="detail">
+    <form method="dialog"><button>Close</button></form>
+    <h2 id="detail-title" style="margin-top:10px">Cycle</h2>
+    <pre id="detail-body"></pre>
+  </dialog>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let killOn = false;
+    let snap = null;
+
+    function money(v) {
+      if (v === null || v === undefined) return "—";
+      return Number(v).toLocaleString(undefined, { style: "currency", currency: "USD" });
+    }
+    function toast(msg, cls) {
+      const el = $("toast");
+      el.textContent = msg || "";
+      el.className = cls || "";
+    }
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"'`]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c])
+      );
+    }
+    function statusClass(s) {
+      if (!s) return "";
+      if (s === "ok") return "ok";
+      if (String(s).includes("error") || s === "halted_kill_switch") return "err";
+      if (String(s).includes("skip")) return "muted";
+      return "warn";
+    }
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || data.message || res.statusText);
+      return data;
+    }
+
+    function fmtWhen(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return String(iso);
+      return d.toLocaleString(undefined, {
+        weekday: "short", month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit",
+      });
+    }
+    function nextCycleIso(s) {
+      if (!s.loop.running) return null;
+      if (s.loop.next_cycle) return s.loop.next_cycle;
+      for (let i = s.log.length - 1; i >= 0; i--) {
+        const l = s.log[i];
+        if (l.msg === "scheduler_stopped") return null;
+        if (l.msg === "scheduler_start") return l.next_cycle || null;
+      }
+      return null;
+    }
+
+    function render(s) {
+      snap = s;
+      killOn = !!s.kill_switch;
+      const paper = !!s.paper;
+      const brokerLabel = paper ? "Alpaca paper" : "Robinhood Agentic";
+      document.title = paper ? "Day trader · paper" : "Day trader · robinhood agentic";
+      $("broker-badge").textContent = paper ? "paper" : "robinhood agentic";
+      $("broker-badge").className = "badge " + (paper ? "paper" : "live");
+      const nxt = nextCycleIso(s);
+      $("loop-badge").textContent = s.loop.running
+        ? (nxt ? `running · next ${fmtWhen(nxt)}` : `running · pid ${s.loop.pid}`)
+        : "stopped";
+      $("loop-badge").className = "badge " + (s.loop.running ? "on" : "off");
+      $("kill-badge").textContent = killOn ? "kill engaged" : "kill off";
+      $("kill-badge").className = "badge " + (killOn ? "kill" : "off");
+      $("btn-start").disabled = s.loop.running;
+      $("btn-stop").disabled = !s.loop.running;
+      $("btn-kill").textContent = killOn ? "Release kill" : "Kill switch";
+
+      const acct = s.account || {};
+      const last = s.last_cycle;
+      const orders = (s.decisions_today.buy || 0) + (s.decisions_today.sell || 0);
+      $("cards").innerHTML = [
+        ["Trading day", s.trading_day, nxt && s.loop.running
+          ? `waiting until ${fmtWhen(nxt)} · ${brokerLabel}`
+          : `${s.cycle_minutes} min · ${brokerLabel}`],
+        ["Equity", money(acct.equity), acct.captured_at ? `as of ${acct.captured_at}` : "no snapshot"],
+        ["Cycles today", s.cycles_today, Object.entries(s.cycles_by_status).map(([k,v]) => `${v} ${k}`).join(" · ") || "none"],
+        ["Decisions today", orders, `${s.decisions_today.no_action || 0} no-action`],
+        ["Unreconciled", s.unreconciled_orders, "submitted, fill unknown"],
+        ["Last cycle", last ? `#${last.cycle_id}` : "—", last ? `${last.status} · ${last.duration_ms || "—"}ms` : ""],
+      ].map(([k,v,sub]) => `<div class="card"><div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
+
+      if (!s.positions.length) {
+        $("positions").innerHTML = `<span class="muted">No open positions in the last snapshot.</span>`;
+      } else {
+        $("positions").innerHTML = `<table><tr><th>Symbol</th><th>Qty</th><th>Last</th><th>Value</th><th>uP/L</th></tr>${
+          s.positions.map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.qty)}</td><td>${money(p.current_price)}</td><td>${money(p.market_value)}</td><td class="${p.unrealized_pl>=0?"ok":"err"}">${money(p.unrealized_pl)}</td></tr>`).join("")
+        }</table>`;
+      }
+
+      $("cycles").innerHTML = `<table><tr><th>ID</th><th>When</th><th>Status</th><th>ms</th></tr>${
+        s.cycles.map(c => `<tr class="clickable" data-id="${c.cycle_id}"><td>${c.cycle_id}</td><td class="muted">${esc(c.started_at)}</td><td class="${statusClass(c.status)}">${esc(c.status)}</td><td>${c.duration_ms ?? "—"}</td></tr>`).join("") || "<tr><td class=muted colspan=4>No cycles yet.</td></tr>"
+      }</table>`;
+      $("cycles").querySelectorAll("tr.clickable").forEach((tr) => {
+        tr.addEventListener("click", () => showCycle(tr.dataset.id));
+      });
+
+      const r = s.risk;
+      if (s.risk_error) {
+        $("risk").innerHTML = `<div class="err">${esc(s.risk_error)}</div>`;
+      } else if (r) {
+        $("risk").innerHTML = `
+          <div class="s">${esc(r.source)} · shorts ${r.allow_shorts ? "on" : "off"} · RTH ${r.regular_trading_hours_only ? "only" : "extended"}</div>
+          <div style="margin:8px 0" class="pill">pos ${money(r.max_position_notional)} · book ${money(r.max_total_exposure)} · day loss ${money(r.max_daily_loss)} · ${r.max_orders_per_cycle}/cycle · ${r.max_orders_per_hour}/hr · ${r.max_orders_per_day}/day</div>
+          <div class="allow">${r.symbol_allowlist.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
+      }
+
+      const br = s.rejection_breakdown.map(x => `${x.n} ${x.check_name}`).join(" · ") || "none";
+      $("rejections").innerHTML = `<div class="s">${esc(br)}</div><table>${
+        s.rejections.map(x => `<tr><td class="muted">${esc(x.timestamp)}</td><td>${x.cycle_id}</td><td class="err">${esc(x.check_name)}</td><td>${esc(x.reason)}</td></tr>`).join("") || "<tr><td class=muted>No rejections.</td></tr>"
+      }</table>`;
+
+      $("decisions").innerHTML = `<table><tr><th>When</th><th>Act</th><th>Sym</th><th>Qty</th><th>Risk</th><th>Outcome</th></tr>${
+        s.decisions.map(d => `<tr><td class="muted">${esc(d.timestamp)}</td><td>${esc(d.action)}</td><td>${esc(d.symbol || "")}</td><td>${d.qty ?? ""}</td><td>${esc(d.risk_result || "")}</td><td>${esc(d.outcome || "")}</td></tr>`).join("") || "<tr><td class=muted colspan=6>None yet.</td></tr>"
+      }</table>`;
+
+      $("log").innerHTML = s.log.map(l => {
+        const lvl = l.level || "INFO";
+        const bits = [
+          l.ts, lvl, l.msg,
+          l.cycle_id != null ? `cycle ${l.cycle_id}` : "",
+          l.next_cycle ? `next ${l.next_cycle}` : "",
+          l.status || "", l.error || "",
+        ].filter(Boolean);
+        return `<div class="${esc(lvl)}">${esc(bits.join("  "))}</div>`;
+      }).join("") || "<div class=muted>No log file yet. Start the loop.</div>";
+    }
+
+    async function refresh() {
+      try {
+        render(await api("/api/snapshot"));
+      } catch (e) {
+        toast(e.message, "err");
+      }
+    }
+
+    async function post(path, body) {
+      return api(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+    }
+
+    async function showCycle(id) {
+      const d = await api(`/api/cycles/${id}`);
+      $("detail-title").textContent = `Cycle ${d.cycle_id} · ${d.status}`;
+      $("detail-body").textContent = [
+        `model: ${d.model || "—"}`,
+        `tokens: ${d.prompt_tokens || 0} in / ${d.completion_tokens || 0} out`,
+        `duration: ${d.duration_ms || "—"}ms`,
+        d.error ? `error: ${d.error}` : "",
+        "",
+        "--- RESPONSE ---",
+        d.full_response || "(none)",
+        "",
+        "--- TOOL CALLS ---",
+        d.tool_calls || "[]",
+      ].filter((x, i, a) => x !== "" || a[i-1] !== "").join("\n");
+      $("detail").showModal();
+    }
+
+    $("btn-start").onclick = async () => {
+      const brokerLabel = snap ? (snap.paper ? "Alpaca paper" : "Robinhood Agentic") : "unknown broker";
+      if (snap && !snap.paper) {
+        const ok = window.confirm(
+          "Start the loop on Robinhood Agentic? Approved orders go to the live Agentic account through the risk layer."
+        );
+        if (!ok) return;
+      }
+      try {
+        const r = await post("/api/loop", { action: "start" });
+        toast(`${r.message} · ${r.broker || brokerLabel}`, "ok");
+        refresh();
+      } catch (e) { toast(e.message, "err"); }
+    };
+    $("btn-stop").onclick = async () => {
+      try { toast((await post("/api/loop", { action: "stop" })).message, "ok"); refresh(); }
+      catch (e) { toast(e.message, "err"); }
+    };
+    $("btn-kill").onclick = async () => {
+      const next = killOn ? "off" : "on";
+      try {
+        await post("/api/kill", { state: next, note: next === "on" ? "from dashboard" : "" });
+        toast(next === "on" ? "kill switch engaged" : "kill switch released", next === "on" ? "err" : "ok");
+        refresh();
+      } catch (e) { toast(e.message, "err"); }
+    };
+    $("btn-reconcile").onclick = async () => {
+      try {
+        const r = await post("/api/reconcile", {});
+        toast(`reconciled ${r.reconciled}, still open ${r.still_open}`, "ok");
+        refresh();
+      } catch (e) { toast(e.message, "err"); }
+    };
+
+    refresh();
+    setInterval(refresh, 2500);
+  </script>
+</body>
+</html>

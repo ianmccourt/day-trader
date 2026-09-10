@@ -22,7 +22,7 @@ from trader.db import (
 from trader.risk.config import RiskConfig
 from trader.risk.engine import Verdict, evaluate
 from trader.risk.models import Proposal, RiskState
-from trader.state import CycleContext
+from trader.state import CycleContext, refresh_cycle_context
 
 log = logging.getLogger("trader.execution")
 
@@ -55,15 +55,28 @@ class ExecutionResult:
         if not self.verdict.approved:
             return self.verdict.as_model_message()
         assert self.receipt is not None
+        extras: list[str] = []
+        if self.proposal.stop_price is not None:
+            extras.append(f"stop={self.proposal.stop_price:g}")
+        if self.proposal.take_profit_price is not None:
+            extras.append(f"take_profit={self.proposal.take_profit_price:g}")
+        attached = f" ({', '.join(extras)})" if extras else ""
         return (
             f"Order accepted: {self.proposal.action} {self.proposal.qty:g} "
-            f"{self.proposal.symbol} (broker id {self.receipt.order_id}, "
+            f"{self.proposal.symbol}{attached} (broker id {self.receipt.order_id}, "
             f"status {self.receipt.status})."
         )
 
 
 def build_proposal(
-    broker: Broker, *, action: str, symbol: str, qty: float, reasoning: str = ""
+    broker: Broker,
+    *,
+    action: str,
+    symbol: str,
+    qty: float,
+    reasoning: str = "",
+    stop_price: float | None = None,
+    take_profit_price: float | None = None,
 ) -> Proposal:
     """Price the proposal from the broker, never from the model."""
     symbol = symbol.strip().upper()
@@ -73,6 +86,8 @@ def build_proposal(
         qty=qty,
         reference_price=broker.get_latest_price(symbol),
         reasoning=reasoning,
+        stop_price=stop_price,
+        take_profit_price=take_profit_price,
     )
 
 
@@ -84,11 +99,13 @@ def place_order(
     config: RiskConfig,
 ) -> ExecutionResult:
     """Risk-check a proposal and, only if it passes every check, submit it."""
-    # Re-read both from the DB rather than trusting ctx: the context was built
-    # at the top of the cycle and the kill switch may have been thrown since
-    # (SPEC.md: checked again before every order).
+    # Re-read from the DB and the broker rather than trusting ctx: the context
+    # was built at the top of the cycle, the kill switch may have been thrown
+    # since (SPEC.md: checked again before every order), and a prior order in
+    # this cycle may have changed the book.
+    live = refresh_cycle_context(conn, broker, ctx)
     state = RiskState.from_context(
-        ctx,
+        live,
         config,
         kill_switch=kill_switch_engaged(conn),
         daily_loss_halted=(get_flag(conn, daily_halt_flag(ctx.trading_day)) or "0") == "1",
@@ -134,7 +151,11 @@ def place_order(
 
     try:
         receipt = broker.submit_order(
-            symbol=proposal.symbol, qty=proposal.qty, side=proposal.action
+            symbol=proposal.symbol,
+            qty=proposal.qty,
+            side=proposal.action,
+            stop_price=proposal.stop_price,
+            take_profit_price=proposal.take_profit_price,
         )
     except BrokerError as exc:
         # Approved but undeliverable. Recorded without an order id so the rate

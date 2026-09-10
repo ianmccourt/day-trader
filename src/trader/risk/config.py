@@ -24,6 +24,7 @@ _SCHEMA: dict[str, set[str]] = {
         "max_daily_loss",
         "max_orders_per_hour",
         "max_orders_per_day",
+        "max_orders_per_cycle",
     },
     "universe": {"symbol_allowlist"},
     "session": {"regular_trading_hours_only", "allow_shorts"},
@@ -44,6 +45,9 @@ class RiskConfig:
     symbol_allowlist: frozenset[str]
     regular_trading_hours_only: bool = True
     allow_shorts: bool = False
+    #: Default 1 preserves the original one-proposal-per-cycle behaviour for
+    #: tests and conservative configs. The high-risk file raises this.
+    max_orders_per_cycle: int = 1
     source: str = "<literal>"
 
     def __post_init__(self) -> None:
@@ -53,6 +57,7 @@ class RiskConfig:
             "max_daily_loss",
             "max_orders_per_hour",
             "max_orders_per_day",
+            "max_orders_per_cycle",
         ):
             value = getattr(self, name)
             if value < 0:
@@ -111,6 +116,7 @@ def load_risk_config(path: Path = DEFAULT_RISK_CONFIG_PATH) -> RiskConfig:
         max_daily_loss=float(_require(raw, "limits", "max_daily_loss", source)),
         max_orders_per_hour=int(_require(raw, "limits", "max_orders_per_hour", source)),
         max_orders_per_day=int(_require(raw, "limits", "max_orders_per_day", source)),
+        max_orders_per_cycle=int(_require(raw, "limits", "max_orders_per_cycle", source)),
         symbol_allowlist=frozenset(symbols),
         regular_trading_hours_only=bool(session.get("regular_trading_hours_only", True)),
         allow_shorts=bool(session.get("allow_shorts", False)),

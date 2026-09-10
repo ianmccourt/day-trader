@@ -91,6 +91,25 @@ def test_only_broker_imports_the_alpaca_sdk() -> None:
     assert not offenders, f"alpaca SDK imported outside broker.py: {offenders}"
 
 
+def test_only_the_robinhood_adapter_imports_mcp_or_http() -> None:
+    """Same isolation as alpaca-py: the MCP client lives in one module."""
+    forbidden = {"mcp", "httpx", "httpx2"}
+    offenders: list[str] = []
+    for path in SRC.rglob("*.py"):
+        if path.name == "robinhood_mcp.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for module in names:
+                if module.split(".")[0] in forbidden:
+                    offenders.append(f"{path.relative_to(SRC)}: {module}")
+    assert not offenders, f"MCP/HTTP imported outside robinhood_mcp.py: {offenders}"
+
+
 # --- Phase 3: exactly one write tool ---------------------------------------
 
 
@@ -155,12 +174,13 @@ def test_the_test_double_implements_the_whole_broker_protocol() -> None:
     """A fake missing a method makes tests pass that would fail in production."""
     from tests.fakes import FakeBroker
     from trader.broker import AlpacaBroker, Broker
+    from trader.robinhood_mcp import RobinhoodMcpBroker
 
     required = {
         name
         for name in dir(Broker)
         if not name.startswith("_") and callable(getattr(Broker, name, None))
     }
-    for implementation in (FakeBroker, AlpacaBroker):
+    for implementation in (FakeBroker, AlpacaBroker, RobinhoodMcpBroker):
         missing = {m for m in required if not hasattr(implementation, m)}
         assert not missing, f"{implementation.__name__} is missing {sorted(missing)}"

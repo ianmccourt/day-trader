@@ -6,6 +6,17 @@ there is no config flag, env var, or argument in this repo that can change it.
 `tests/test_paper_only.py` fails the build if a live endpoint appears anywhere
 in `src/`.
 
+A Robinhood Agentic account can be used in two ways:
+
+- **Cursor MCP (Path A).** User-level `~/.cursor/mcp.json` only — never this
+  project's `.cursor/`. Those live writes skip this harness's risk layer.
+- **`trader run` (Path B).** `TRADER_BROKER=robinhood_agentic` sends approved
+  orders through the same risk layer to the Agentic MCP account. Default is
+  still Alpaca paper. There is no Alpaca live URL in this repo.
+
+`trader evaluate`'s SPY benchmark still uses Alpaca paper market data when
+those keys are present. Treat Robinhood Activity as the live blotter.
+
 Built in the phases laid out in `spec.MD`. **All four phases are complete.**
 
 ## Setup
@@ -29,8 +40,17 @@ uv run trader rejections           # risk rejections, by check and most recent
 uv run trader reconcile            # read submitted orders back from the broker
 uv run trader evaluate --start ... --end ...   # did it beat doing nothing?
 uv run trader kill on|off|status   # kill switch (persisted in the DB)
+uv run trader dashboard            # local browser panel (start/stop/monitor)
+uv run trader rh-login             # authorize Robinhood Agentic (browser OAuth)
 uv run trader --text-logs ...      # human-readable logs instead of JSON lines
 ```
+
+Set `TRADER_BROKER=robinhood_agentic` in `.env` to route `run` / `cycle` /
+`reconcile` at the Agentic account. Run `rh-login` once on the desktop first —
+a nohup'd loop cannot complete the browser handshake. Tokens land in
+`data/robinhood_tokens.json` (gitignored). If the MCP write tool cannot attach
+a requested stop or take-profit, the adapter refuses the order instead of
+submitting unprotected.
 
 `status`, `cycles`, `show`, `rejections`, `kill` and `evaluate` read only the DB
 and work without any Alpaca credentials (`evaluate` drops the SPY benchmark and
@@ -57,6 +77,7 @@ uv run trader --risk-config risk.conservative.toml run
 | `max_total_exposure` | $25,000 | **$200,000** |
 | `max_daily_loss` | $2,000 | **$10,000** |
 | `max_orders_per_hour` / `per_day` | 6 / 20 | **20 / 100** |
+| `max_orders_per_cycle` | 1 | **4** |
 | allowlist | 5 large caps | **21 names incl. 3x ETFs** |
 | `allow_shorts` | false | **true** |
 
@@ -84,22 +105,43 @@ Everything structural still holds — the paper endpoint, the single gated order
 path, the one write tool, proposal sanity, the allowlist, RTH, and the kill
 switch are all unchanged. These are limits, not mechanisms.
 
-### Order rate is set by cadence, not by risk.toml
+### Order rate is cadence × per-cycle cap, bounded by risk.toml
 
-The agent may place **at most one order per cycle**, so the cycle interval is
-the real ceiling:
+The agent may place up to `max_orders_per_cycle` orders per wake (high-risk: 4;
+conservative: 1). Stops and take-profits ride on the entry as an Alpaca OTO or
+bracket, so they live at the broker between cycles. The cycle interval is no
+longer a 1-order ceiling:
 
-| `TRADER_CYCLE_MINUTES` | max orders/hour | max orders/day | tokens/week | cost/week |
+| `TRADER_CYCLE_MINUTES` | cycles/hour | max orders/hour at 4/cycle | tokens/week (idle) | cost/week |
 | ---: | ---: | ---: | ---: | ---: |
-| 15 (default) | 4 | 26 | 535K | $1.36 |
-| 5 | 12 | 78 | 1.6M | $4.07 |
-| 3 | 20 | 130 | 2.7M | $6.79 |
-| 2 | 30 | 195 | 4.0M | $10.18 |
+| 15 | 4 | 16 | 535K | $1.36 |
+| 5 (default) | 12 | 48 | 1.6M | $4.07 |
+| 3 | 20 | 80 | 2.7M | $6.79 |
+| 2 | 30 | 120 | 4.0M | $10.18 |
 
-At the default 15 minutes, `max_orders_per_hour = 20` can never fire. Drop the
-cadence to 3 minutes to make it bind.
+Hourly and daily caps in `risk.toml` are what actually bind. Token cost assumes
+an idle cycle; a cycle that places several orders and reads bars will cost more.
+
+At the default 5 minutes with 4 orders/cycle, `max_orders_per_hour = 20` is the
+real ceiling.
 
 ## Running and monitoring
+
+### Control panel
+
+A local browser UI starts, stops, and monitors the loop. It binds to loopback
+only and never submits orders — Start/Stop spawn `trader run`, and the kill
+switch is the same DB flag as the CLI.
+
+```bash
+uv run trader dashboard
+```
+
+Opens `http://127.0.0.1:8765/`. `--no-browser` if you just want the URL.
+`--port 9000` if 8765 is taken. Status, cycles, rejections, and the log tail
+refresh every few seconds. The header badge shows `paper` or `robinhood
+agentic`; Start on Robinhood asks for confirmation. Reconcile uses whichever
+broker `TRADER_BROKER` selected.
 
 ### Start it
 
@@ -121,7 +163,7 @@ Startup logs the next fire time and the kill-switch state, so a loop started
 outside market hours is visibly waiting rather than hung:
 
 ```json
-{"msg":"scheduler_start","cycle_minutes":15,"risk_config":"risk.toml",
+{"msg":"scheduler_start","cycle_minutes":5,"risk_config":"risk.toml",
  "next_cycle":"2026-09-10T09:00:00-04:00","kill_switch":false,"window":"09:30-16:00 ET"}
 ```
 
@@ -278,7 +320,7 @@ AST-scans `src/` and fails the build if any of these stop holding:
 
 Three more properties worth knowing:
 
-- **The engine never short-circuits.** All ten checks run on every proposal, so a
+- **The engine never short-circuits.** All registered checks run on every proposal, so a
   rejection tells the model everything that is wrong in one round trip.
 - **A check that raises counts as a failure.** A risk layer that fails open is
   worse than no risk layer.
@@ -298,7 +340,9 @@ Three more properties worth knowing:
 | `max_position_notional` | Caps the **resulting** position, not the order — otherwise an unbounded position can be built from individually legal slices. Sells that reduce an oversized position are still allowed, or we could never unwind one. |
 | `max_total_exposure` | Recomputes the traded symbol at the reference price rather than reusing its snapshot, so a stale `market_value` cannot understate the result. |
 | `max_daily_loss` | **Latches.** The first breach writes a `daily_loss_halt:<day>` flag; an intraday recovery does not re-enable trading. Fails closed if the prior close is unknown. |
-| `max_orders_per_hour` / `max_orders_per_day` | Counted from our own `decisions` rows — the broker has no idea which of its orders came from this harness. An approved order the broker then rejects gets no order id, so it does not consume budget. |
+| `max_orders_per_hour` / `max_orders_per_day` / `max_orders_per_cycle` | Counted from our own `decisions` rows — the broker has no idea which of its orders came from this harness. An approved order the broker then rejects gets no order id, so it does not consume budget. `max_orders_per_cycle` is the per-wake cap; the tool layer also refuses extra *attempts*. |
+| `protective_exits` | Stop/take-profit must sit on the correct side of the entry. Missing exits are allowed. |
+| `stop_loss_budget` | A stop whose dollar risk exceeds the remaining daily-loss budget is rejected. |
 
 `uv run pytest` — 46 per-check units (a passing, failing and boundary case
 each), and 22 adversarial cases run through the real execution path against a
@@ -337,9 +381,9 @@ second tool calls it, if any read tool contains an `INSERT`/`UPDATE`/`DELETE`,
 if `tools.py` imports `subprocess`/`requests`/`httpx`/`socket`, or if anything
 rebinds the risk config.
 
-At most one order per cycle. A second call — including a second `place_order`
-block in the *same* assistant turn — comes back as an error result, not an
-order.
+At most `max_orders_per_cycle` orders per cycle. A further call comes back as an
+error result, not an order. Optional `stop_price` and `take_profit_price` ride
+on the entry as a broker-side OTO or bracket.
 
 ### The context budget
 
@@ -525,7 +569,7 @@ Nothing was dropped or renamed. Additions:
 
 ## Tests
 
-`uv run pytest` — 211 tests, ruff clean. The structural invariants are worth
+`uv run pytest` — 263 tests, ruff clean. The structural invariants are worth
 knowing about, because they fail the build rather than relying on review:
 
 | File | Guards |

@@ -54,3 +54,39 @@ def test_settings_has_no_url_field() -> None:
     from trader.config import Settings
 
     assert not any("url" in f.lower() for f in Settings.__dataclass_fields__)
+
+
+# Robinhood Agentic MCP is a separate Cursor-level live account (Path A).
+# It must not be registered in this project, or the paper loop would see
+# live write tools and skip the risk layer.
+_RH_MCP = "agent.robinhood.com"
+
+
+def test_project_cursor_config_does_not_register_robinhood_mcp() -> None:
+    """User-level ~/.cursor/mcp.json is the RH connection. This repo is not."""
+    project_cursor = ROOT / ".cursor"
+    if not project_cursor.exists():
+        return
+    for path in project_cursor.rglob("*"):
+        if path.is_file():
+            assert _RH_MCP not in path.read_text(encoding="utf-8", errors="replace"), path
+
+
+def test_src_references_robinhood_mcp_only_in_the_adapter() -> None:
+    """The host string lives in the adapter, same pattern as the live Alpaca guard."""
+    offenders = [
+        f"{path.relative_to(ROOT)}:{lineno}"
+        for path in SOURCE_FILES
+        if path.name != "robinhood_mcp.py"
+        for lineno, line in enumerate(path.read_text().splitlines(), 1)
+        if _RH_MCP in line
+    ]
+    assert not offenders, "Robinhood MCP host leaked outside the adapter:\n" + "\n".join(
+        offenders
+    )
+
+
+def test_adapter_pins_the_official_robinhood_mcp_url() -> None:
+    from trader.robinhood_mcp import ROBINHOOD_MCP_URL
+
+    assert ROBINHOOD_MCP_URL == "https://agent.robinhood.com/mcp/trading"

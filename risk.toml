@@ -23,13 +23,14 @@ max_total_exposure = 200000.0
 # size it is the real backstop, so leave it enabled. Was $2,000 (2%).
 max_daily_loss = 10000.0
 
-# Rate limits. NOTE: these do not bind at the default 15-minute cadence — the
-# agent may place at most one order per cycle, so cadence is the real ceiling
-# (15 min -> 4/hour, 26/day). To make these meaningful, drop
-# TRADER_CYCLE_MINUTES to 3 (20/hour, 130/day) or 2 (30/hour, 195/day).
-# See the token-cost note in the README before doing that.
+# Rate limits. At 5-minute cadence with max_orders_per_cycle = 4 the theoretical
+# ceiling is 48/hour, so these hourly/daily caps are what actually bind.
+# See the token-cost note in the README before dropping cadence further.
 max_orders_per_hour = 20
 max_orders_per_day = 100
+# The agent may now place several orders in one cycle (scale in, hedge, exit).
+# Cadence is no longer a hard 1-order ceiling. This is the per-wake cap.
+max_orders_per_cycle = 4
 
 [universe]
 # High-beta liquid names plus 3x leveraged ETFs. The leveraged tickers

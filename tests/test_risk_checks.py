@@ -51,12 +51,38 @@ def held(symbol: str, qty: float, price: float) -> dict[str, PositionState]:
     return {symbol: PositionState(symbol=symbol, qty=qty, market_value=qty * price)}
 
 
-def buy(symbol: str = "AAPL", qty: float = 10, price: float = 100.0) -> Proposal:
-    return Proposal(action="buy", symbol=symbol, qty=qty, reference_price=price)
+def buy(
+    symbol: str = "AAPL",
+    qty: float = 10,
+    price: float = 100.0,
+    stop_price: float | None = None,
+    take_profit_price: float | None = None,
+) -> Proposal:
+    return Proposal(
+        action="buy",
+        symbol=symbol,
+        qty=qty,
+        reference_price=price,
+        stop_price=stop_price,
+        take_profit_price=take_profit_price,
+    )
 
 
-def sell(symbol: str = "AAPL", qty: float = 10, price: float = 100.0) -> Proposal:
-    return Proposal(action="sell", symbol=symbol, qty=qty, reference_price=price)
+def sell(
+    symbol: str = "AAPL",
+    qty: float = 10,
+    price: float = 100.0,
+    stop_price: float | None = None,
+    take_profit_price: float | None = None,
+) -> Proposal:
+    return Proposal(
+        action="sell",
+        symbol=symbol,
+        qty=qty,
+        reference_price=price,
+        stop_price=stop_price,
+        take_profit_price=take_profit_price,
+    )
 
 
 # --- kill_switch -----------------------------------------------------------
@@ -279,6 +305,85 @@ def test_max_orders_per_day_rejects_at_and_above_the_limit() -> None:
     ok, reason = checks.max_orders_per_day(buy(), state(orders_today=21))
     assert not ok
     assert "max_orders_per_day 20" in reason
+
+
+def test_max_orders_per_cycle_accepts_below_the_limit() -> None:
+    assert checks.max_orders_per_cycle(buy(), state(orders_this_cycle=0)) == (True, "")
+
+
+def test_max_orders_per_cycle_rejects_at_and_above_the_limit() -> None:
+    assert checks.max_orders_per_cycle(buy(), state(orders_this_cycle=1))[0] is False
+    ok, reason = checks.max_orders_per_cycle(buy(), state(orders_this_cycle=2))
+    assert not ok
+    assert "max_orders_per_cycle 1" in reason
+
+
+# --- protective exits ------------------------------------------------------
+
+
+def test_protective_exits_allows_a_plain_order() -> None:
+    assert checks.protective_exits(buy(), state()) == (True, "")
+
+
+def test_protective_exits_rejects_a_stop_above_a_long() -> None:
+    ok, reason = checks.protective_exits(buy(stop_price=110.0), state())
+    assert not ok
+    assert "below entry" in reason
+
+
+def test_protective_exits_boundary_stop_must_be_strictly_below() -> None:
+    assert checks.protective_exits(buy(stop_price=99.99), state())[0] is True
+    assert checks.protective_exits(buy(stop_price=100.0), state())[0] is False
+
+
+def test_protective_exits_rejects_take_profit_below_a_long() -> None:
+    ok, reason = checks.protective_exits(buy(take_profit_price=90.0), state())
+    assert not ok
+    assert "above entry" in reason
+
+
+def test_protective_exits_short_geometry() -> None:
+    assert checks.protective_exits(sell(stop_price=110.0, take_profit_price=90.0), state()) == (
+        True,
+        "",
+    )
+    assert checks.protective_exits(sell(stop_price=90.0), state())[0] is False
+    assert checks.protective_exits(sell(take_profit_price=110.0), state())[0] is False
+
+
+def test_protective_exits_rejects_non_finite_prices() -> None:
+    assert checks.protective_exits(buy(stop_price=math.nan), state())[0] is False
+    assert checks.protective_exits(buy(stop_price=-1.0), state())[0] is False
+
+
+# --- stop-loss vs daily budget ---------------------------------------------
+
+
+def test_stop_loss_budget_allows_a_tight_stop() -> None:
+    # 10 sh * $5 = $50 of stop risk, well inside the $2,000 daily cap.
+    assert checks.stop_loss_budget(buy(stop_price=95.0), state()) == (True, "")
+
+
+def test_stop_loss_budget_rejects_a_stop_wider_than_the_day() -> None:
+    # 10 sh * $250 = $2,500 > $2,000.
+    ok, reason = checks.stop_loss_budget(buy(price=300.0, stop_price=50.0), state())
+    assert not ok
+    assert "exceeds remaining daily-loss" in reason
+
+
+def test_stop_loss_budget_shrinks_when_the_day_is_already_red() -> None:
+    # Remaining budget = 2000 - 1500 = 500. 10 sh * $10 = $100, still ok.
+    assert checks.stop_loss_budget(
+        buy(stop_price=90.0), state(equity=98_500.0)
+    )[0] is True
+    # 10 sh * $60 = $600 > $500 remaining.
+    ok, reason = checks.stop_loss_budget(buy(stop_price=40.0), state(equity=98_500.0))
+    assert not ok
+    assert "remaining daily-loss budget" in reason
+
+
+def test_stop_loss_budget_skips_when_no_stop_is_set() -> None:
+    assert checks.stop_loss_budget(buy(), state()) == (True, "")
 
 
 # --- no_unintended_short ---------------------------------------------------

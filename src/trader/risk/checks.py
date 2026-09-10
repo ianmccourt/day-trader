@@ -11,6 +11,7 @@ tests/test_risk_checks.py with a passing, failing, and boundary case each.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 from trader.risk.models import Proposal, RiskState
@@ -156,6 +157,94 @@ def max_orders_per_day(proposal: Proposal, state: RiskState) -> CheckResult:
     return OK
 
 
+def max_orders_per_cycle(proposal: Proposal, state: RiskState) -> CheckResult:
+    """Cap proposals that already reached the broker this cycle.
+
+    The tool layer also refuses extra *attempts*, including rejections. This
+    check is the backstop for anything that calls place_order directly.
+    """
+    limit = state.config.max_orders_per_cycle
+    if state.orders_this_cycle >= limit:
+        return False, (
+            f"{state.orders_this_cycle} orders this cycle reaches "
+            f"max_orders_per_cycle {limit}"
+        )
+    return OK
+
+
+def protective_exits(proposal: Proposal, state: RiskState) -> CheckResult:
+    """Stop and take-profit must be on the correct side of the entry.
+
+    A buy-stop above a long, or a take-profit below it, would fire immediately
+    or protect nothing. Missing exits are allowed — the system prompt does not
+    encode a strategy — but a present one has to be geometrically valid.
+    """
+    stop = proposal.stop_price
+    take_profit = proposal.take_profit_price
+    if stop is None and take_profit is None:
+        return OK
+    for name, value in (("stop_price", stop), ("take_profit_price", take_profit)):
+        if value is None:
+            continue
+        if not math.isfinite(value) or value <= 0:
+            return False, f"{name} must be a positive finite price, got {value!r}"
+    ref = proposal.reference_price
+    if not math.isfinite(ref) or ref <= 0:
+        return OK  # proposal_sanity reports the real problem
+    if proposal.action == "buy":
+        if stop is not None and stop >= ref:
+            return False, (
+                f"stop_price {_money(stop)} must be below entry {_money(ref)} for a long"
+            )
+        if take_profit is not None and take_profit <= ref:
+            return False, (
+                f"take_profit_price {_money(take_profit)} must be above entry "
+                f"{_money(ref)} for a long"
+            )
+    else:
+        if stop is not None and stop <= ref:
+            return False, (
+                f"stop_price {_money(stop)} must be above entry {_money(ref)} for a short"
+            )
+        if take_profit is not None and take_profit >= ref:
+            return False, (
+                f"take_profit_price {_money(take_profit)} must be below entry "
+                f"{_money(ref)} for a short"
+            )
+    return OK
+
+
+def stop_loss_budget(proposal: Proposal, state: RiskState) -> CheckResult:
+    """A stop that would lose more than the remaining daily budget is rejected.
+
+    Without this, a $25k 3x-ETF position with a 50% stop could blow past
+    max_daily_loss between cycles while the protective order sat at the broker.
+    No stop means this check does not fire; max_daily_loss still latches later.
+    """
+    if proposal.stop_price is None:
+        return OK
+    if not proposal.is_finite or not math.isfinite(proposal.stop_price):
+        return OK
+    potential = abs(proposal.reference_price - proposal.stop_price) * proposal.qty
+    limit = state.config.max_daily_loss
+    pl = state.daily_pl
+    if pl is None:
+        return OK  # max_daily_loss already fails closed
+    remaining = limit + min(pl, 0.0)
+    if remaining <= 0:
+        return False, (
+            f"no remaining daily-loss budget to underwrite a stop "
+            f"(max_daily_loss {_money(limit)}, daily P/L {_money(pl)})"
+        )
+    if potential > remaining:
+        return False, (
+            f"stop-loss risk {_money(potential)} exceeds remaining daily-loss "
+            f"budget {_money(remaining)} (max_daily_loss {_money(limit)}, "
+            f"daily P/L {_money(pl)})"
+        )
+    return OK
+
+
 def no_unintended_short(proposal: Proposal, state: RiskState) -> CheckResult:
     """Reject any order that opens or increases a short position.
 
@@ -189,6 +278,9 @@ CHECKS: tuple[Check, ...] = (
     max_daily_loss,
     max_orders_per_hour,
     max_orders_per_day,
+    max_orders_per_cycle,
+    protective_exits,
+    stop_loss_budget,
 )
 
 CHECK_NAMES: tuple[str, ...] = tuple(c.__name__ for c in CHECKS)
