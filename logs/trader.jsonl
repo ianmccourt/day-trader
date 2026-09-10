@@ -11,3 +11,146 @@
 {"ts": "2026-09-10T15:15:00.112+00:00", "level": "ERROR", "logger": "apscheduler.executors.default", "msg": "Job \"trading_cycle (trigger: cron[day_of_week='mon-fri', hour='9-15', minute='*/5'], next run at: 2026-09-10 11:20:00 EDT)\" raised an exception", "exc": "Traceback (most recent call last):\n  File \"/Users/ianmccourt/AI/day-trader/.venv/lib/python3.12/site-packages/apscheduler/executors/base.py\", line 131, in run_job\n    retval = job.func(*job.args, **job.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/scheduler.py\", line 65, in job\n    outcome = run_cycle(conn, broker, agent, risk_config=risk_config)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/cycle.py\", line 68, in run_cycle\n    cycle_id = open_cycle(conn, started_at=started, trading_day=day)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/db.py\", line 208, in open_cycle\n    cur = conn.execute(\n          ^^^^^^^^^^^^^\nsqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 8476188032 and this is thread id 6183874560."}
 {"ts": "2026-09-10T15:20:00.039+00:00", "level": "ERROR", "logger": "apscheduler.executors.default", "msg": "Job \"trading_cycle (trigger: cron[day_of_week='mon-fri', hour='9-15', minute='*/5'], next run at: 2026-09-10 11:25:00 EDT)\" raised an exception", "exc": "Traceback (most recent call last):\n  File \"/Users/ianmccourt/AI/day-trader/.venv/lib/python3.12/site-packages/apscheduler/executors/base.py\", line 131, in run_job\n    retval = job.func(*job.args, **job.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/scheduler.py\", line 65, in job\n    outcome = run_cycle(conn, broker, agent, risk_config=risk_config)\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/cycle.py\", line 68, in run_cycle\n    cycle_id = open_cycle(conn, started_at=started, trading_day=day)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/db.py\", line 208, in open_cycle\n    cur = conn.execute(\n          ^^^^^^^^^^^^^\nsqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 8476188032 and this is thread id 6183874560."}
 {"ts": "2026-09-10T15:25:00.015+00:00", "level": "ERROR", "logger": "apscheduler.executors.default", "msg": "Job \"trading_cycle (trigger: cron[day_of_week='mon-fri', hour='9-15', minute='*/5'], next run at: 2026-09-10 11:30:00 EDT)\" raised an exception", "exc": "Traceback (most recent call last):\n  File \"/Users/ianmccourt/AI/day-trader/.venv/lib/python3.12/site-packages/apscheduler/executors/base.py\", line 131, in run_job\n    retval = job.func(*job.args, **job.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/scheduler.py\", line 65, in job\n    # leaked out of run_cycle (connection created on the main thread).\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/cycle.py\", line 68, in run_cycle\n    cycle_id = open_cycle(conn, started_at=started, trading_day=day)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/ianmccourt/AI/day-trader/src/trader/db.py\", line 208, in open_cycle\n    conn.execute(\"ROLLBACK\")\n      ^^^^^^^^^^^^^^^^^^^^^^\nsqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 8476188032 and this is thread id 6183874560."}
+{"ts": "2026-09-10T15:26:23.145+00:00", "level": "WARNING", "logger": "trader.scheduler", "msg": "shutdown_signal", "signal": "SIGTERM"}
+{"ts": "2026-09-10T15:26:23.157+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_stopped"}
+{"ts": "2026-09-10T15:26:27.144+00:00", "level": "INFO", "logger": "trader.scheduler", "msg": "scheduler_start", "cycle_minutes": 5, "risk_config": "risk.toml", "next_cycle": "2026-09-10T11:30:00-04:00", "kill_switch": false, "window": "09:30-16:00 ET"}
+{"ts": "2026-09-10T15:30:00.016+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 5, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T15:30:00.968+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:30:03.974+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:30:04.006+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 5, "status": "ok", "duration_ms": 3990, "action": "no_action", "error": null}
+{"ts": "2026-09-10T15:35:00.030+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 6, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T15:35:00.715+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:35:03.524+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:35:03.531+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 6, "status": "ok", "duration_ms": 3504, "action": "no_action", "error": null}
+{"ts": "2026-09-10T15:40:00.016+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 7, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T15:40:00.728+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:40:04.003+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:40:04.007+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 7, "status": "ok", "duration_ms": 3992, "action": "no_action", "error": null}
+{"ts": "2026-09-10T15:45:00.028+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 8, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T15:45:00.645+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:45:04.410+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:45:04.416+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 8, "status": "ok", "duration_ms": 4389, "action": "no_action", "error": null}
+{"ts": "2026-09-10T15:50:00.017+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 9, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T15:50:00.619+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:50:02.948+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:50:02.953+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 9, "status": "ok", "duration_ms": 2938, "action": "no_action", "error": null}
+{"ts": "2026-09-10T15:55:00.017+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 10, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T15:55:00.544+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:55:02.428+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T15:55:02.434+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 10, "status": "ok", "duration_ms": 2418, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:00:00.016+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 11, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:00:00.706+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:00:03.003+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:00:03.008+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 11, "status": "ok", "duration_ms": 2994, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:05:00.017+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 12, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:05:00.637+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:05:03.663+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:05:03.667+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 12, "status": "ok", "duration_ms": 3651, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:10:00.018+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 13, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:10:00.696+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:10:03.080+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:10:03.087+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 13, "status": "ok", "duration_ms": 3069, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:15:00.012+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 14, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:15:00.648+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:15:04.241+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:15:04.246+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 14, "status": "ok", "duration_ms": 4237, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:20:00.010+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 15, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:20:00.599+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:20:03.594+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:20:03.597+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 15, "status": "ok", "duration_ms": 3588, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:25:00.013+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 16, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:25:00.612+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:25:03.085+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:25:03.091+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 16, "status": "ok", "duration_ms": 3079, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:30:00.003+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 17, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:30:00.584+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:30:02.708+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:30:02.714+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 17, "status": "ok", "duration_ms": 2711, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:35:00.017+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 18, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:35:00.696+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:35:02.706+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:35:02.713+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 18, "status": "ok", "duration_ms": 2697, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:40:00.009+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 19, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:40:00.583+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:40:02.983+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:40:02.988+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 19, "status": "ok", "duration_ms": 2981, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:45:00.009+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 20, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:45:00.752+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:45:03.109+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:45:03.114+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 20, "status": "ok", "duration_ms": 3106, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:50:00.012+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 21, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:50:00.633+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:50:03.136+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:50:03.142+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 21, "status": "ok", "duration_ms": 3131, "action": "no_action", "error": null}
+{"ts": "2026-09-10T16:55:00.014+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 22, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T16:55:00.512+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:55:03.390+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T16:55:03.395+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 22, "status": "ok", "duration_ms": 3382, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:00:00.005+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 23, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:00:00.769+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:00:03.362+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:00:03.366+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 23, "status": "ok", "duration_ms": 3362, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:05:00.010+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 24, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:05:00.544+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:05:02.876+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:05:02.880+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 24, "status": "ok", "duration_ms": 2871, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:10:00.009+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 25, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:10:00.631+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:10:02.801+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:10:02.806+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 25, "status": "ok", "duration_ms": 2799, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:15:00.005+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 26, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:15:00.508+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:15:02.828+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:15:02.833+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 26, "status": "ok", "duration_ms": 2828, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:20:00.007+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 27, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:20:00.556+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:20:02.652+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:20:02.657+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 27, "status": "ok", "duration_ms": 2651, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:25:00.027+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 28, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:25:00.655+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:25:02.693+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:25:02.698+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 28, "status": "ok", "duration_ms": 2673, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:30:00.010+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 29, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:30:00.875+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:30:03.680+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:30:03.685+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 29, "status": "ok", "duration_ms": 3676, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:35:00.014+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 30, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:35:00.556+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:35:03.261+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:35:03.266+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 30, "status": "ok", "duration_ms": 3252, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:40:00.017+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 31, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:40:00.493+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:40:03.091+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:40:03.096+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 31, "status": "ok", "duration_ms": 3080, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:45:00.013+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 32, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:45:00.608+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:45:03.325+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:45:03.330+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 32, "status": "ok", "duration_ms": 3318, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:50:00.022+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 33, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:50:00.542+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:50:03.152+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:50:03.156+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 33, "status": "ok", "duration_ms": 3136, "action": "no_action", "error": null}
+{"ts": "2026-09-10T17:55:00.012+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 34, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T17:55:00.508+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:55:02.781+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T17:55:02.786+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 34, "status": "ok", "duration_ms": 2775, "action": "no_action", "error": null}
+{"ts": "2026-09-10T18:00:00.014+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 35, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T18:00:00.720+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:00:02.811+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:00:02.816+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 35, "status": "ok", "duration_ms": 2802, "action": "no_action", "error": null}
+{"ts": "2026-09-10T18:05:00.015+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 36, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T18:05:00.614+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:05:03.059+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:05:03.064+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 36, "status": "ok", "duration_ms": 3050, "action": "no_action", "error": null}
+{"ts": "2026-09-10T18:10:00.006+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 37, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T18:10:00.563+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:10:03.283+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:10:03.292+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 37, "status": "ok", "duration_ms": 3287, "action": "no_action", "error": null}
+{"ts": "2026-09-10T18:15:00.017+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 38, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T18:15:00.847+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:15:03.526+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:15:03.535+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 38, "status": "ok", "duration_ms": 3517, "action": "no_action", "error": null}
+{"ts": "2026-09-10T18:20:00.010+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_start", "cycle_id": 39, "trading_day": "2026-09-10"}
+{"ts": "2026-09-10T18:20:00.637+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:20:02.586+00:00", "level": "INFO", "logger": "httpx2", "msg": "HTTP Request: POST https://api.anthropic.com/v1/messages \"HTTP/1.1 200 OK\""}
+{"ts": "2026-09-10T18:20:02.590+00:00", "level": "INFO", "logger": "trader.cycle", "msg": "cycle_end", "cycle_id": 39, "status": "ok", "duration_ms": 2581, "action": "no_action", "error": null}

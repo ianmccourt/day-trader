@@ -121,10 +121,11 @@ doing nothing.
 
 ## Strategy
 
-Deliberately unspecified. The system prompt in `prompts/` should be a
-placeholder that states the agent's constraints and available tools but gives it
-no edge-seeking instructions. I'll write that part myself once the harness works.
-Do not invent a trading strategy or fill this in with indicator heuristics.
+Lives in `prompts/system.txt` as the operator playbook (15-minute opening-range
+breakout with a SPY/QQQ regime filter, mandatory stops, size-from-stop). The
+harness still does not encode a strategy in code: bars are raw OHLCV, the risk
+layer does not pick symbols, and `src/` must not inline prompt text. Edit the
+playbook in `prompts/`; restart the loop for it to take effect.
 
 ## Style
 

@@ -58,13 +58,19 @@ def test_no_prompt_text_is_inlined_in_the_source() -> None:
         assert "You are " not in text, f"prompt text inlined in {path.name}"
 
 
-def test_the_system_prompt_states_the_constraints_but_no_strategy() -> None:
-    """SPEC.md: a placeholder, with no edge-seeking instructions."""
+def test_the_system_prompt_is_the_playbook() -> None:
+    """The operator playbook lives in prompts/system.txt, not inline in src/."""
     system = prompts.load("system", PROMPT_DIR).lower()
-    assert "placeholder" in system
+    assert "placeholder" not in system
     assert "place_order" in system
     assert "risk layer" in system
     assert "kill switch" in system
-    # Nothing that would amount to a strategy.
-    for banned in ("moving average", "rsi", "momentum", "buy low", "oversold", "breakout"):
-        assert banned not in system, f"strategy hint {banned!r} leaked into the system prompt"
+    for required in (
+        "get_quote",
+        "get_bars",
+        "opening range",
+        "stop_price",
+        "take_profit",
+        "invalidation",
+    ):
+        assert required in system, f"playbook missing {required!r}"

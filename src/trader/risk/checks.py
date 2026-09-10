@@ -176,8 +176,8 @@ def protective_exits(proposal: Proposal, state: RiskState) -> CheckResult:
     """Stop and take-profit must be on the correct side of the entry.
 
     A buy-stop above a long, or a take-profit below it, would fire immediately
-    or protect nothing. Missing exits are allowed — the system prompt does not
-    encode a strategy — but a present one has to be geometrically valid.
+    or protect nothing.     Missing exits are allowed by this check (the playbook may still require
+    them) — but a present one has to be geometrically valid.
     """
     stop = proposal.stop_price
     take_profit = proposal.take_profit_price

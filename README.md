@@ -357,9 +357,11 @@ model's proposal and the broker and hand the verdict back as a tool result, and
 spec.MD asks to own every failure mode.
 
 Prompt text lives in [`prompts/`](prompts) as plain `.txt` files; a test fails
-the build if prompt text appears inline in `src/`. The system prompt is a
-**placeholder** — it states what the agent is, what it can call, and what will
-stop it, and contains no strategy. A test asserts no strategy hints leaked in.
+the build if prompt text appears inline in `src/`. `prompts/system.txt` is the
+operator playbook: 15-minute opening-range continuation, SPY/QQQ regime filter,
+mandatory `get_quote`/`get_bars` before a new order, size from the stop, and a
+hard stop plus take-profit on every entry. The risk layer still does not pick
+trades. Editing the prompt while the loop is live has no effect until restart.
 
 ### The tool surface
 
@@ -569,7 +571,7 @@ Nothing was dropped or renamed. Additions:
 
 ## Tests
 
-`uv run pytest` — 263 tests, ruff clean. The structural invariants are worth
+`uv run pytest` — 266 tests, ruff clean. The structural invariants are worth
 knowing about, because they fail the build rather than relying on review:
 
 | File | Guards |
@@ -579,7 +581,7 @@ knowing about, because they fail the build rather than relying on review:
 | `test_risk_checks.py` | every check: passing, failing, boundary |
 | `test_risk_adversarial.py` | the hostile battery through the real execution path |
 | `test_llm.py` | tool loop, one-order rule, budget asserted every iteration |
-| `test_prompts.py` | no prompt text inline in `src/`, no strategy in the placeholder |
+| `test_prompts.py` | no prompt text inline in `src/`, playbook present in `prompts/system.txt` |
 | `test_evaluate.py` | FIFO matching, window boundaries, and every case the report refuses to guess |
 | `test_state.py` | the rendering stays bounded by bytes as theses accumulate |
 
