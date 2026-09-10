@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
+
 import pytest
 
 from tests.fakes import FakeBroker, position
@@ -26,6 +29,26 @@ def conn(tmp_path):
 @pytest.fixture
 def broker():
     return FakeBroker(positions=[position("AAPL", 10, 200.0, 205.0)])
+
+
+def test_a_cycle_can_run_on_a_worker_thread(tmp_path) -> None:
+    """Regression: APScheduler's default pool is a different thread than connect()."""
+    conn = connect(tmp_path / "t.sqlite3")
+    broker = FakeBroker()
+    err: list[sqlite3.Error] = []
+    outcome: list[object] = []
+
+    def job() -> None:
+        try:
+            outcome.append(run_cycle(conn, broker, StubAgent()))
+        except sqlite3.Error as exc:
+            err.append(exc)
+
+    t = threading.Thread(target=job)
+    t.start()
+    t.join()
+    assert err == [], err
+    assert outcome and outcome[0].status == STATUS_OK
 
 
 def test_open_market_cycle_logs_everything(conn, broker) -> None:

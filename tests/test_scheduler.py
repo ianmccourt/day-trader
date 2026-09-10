@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from trader.constants import MARKET_TZ
-from trader.scheduler import rth_trigger
+from trader.scheduler import rth_trigger, run_scheduler
 
 
 def _fire_times(cycle_minutes: int, start: datetime, hours: int) -> list[datetime]:
@@ -48,3 +48,12 @@ def test_cycle_minutes_changes_cadence() -> None:
     # Inclusive of both endpoints: 09:00 through 10:00.
     assert len(_fire_times(5, start, hours=1)) == 13
     assert len(_fire_times(30, start, hours=1)) == 3
+
+
+def test_scheduler_runs_jobs_on_the_scheduler_thread() -> None:
+    """APScheduler's default thread pool is what blew up sqlite3 in production."""
+    import inspect
+
+    source = inspect.getsource(run_scheduler)
+    assert "DebugExecutor" in source
+    assert "ThreadPoolExecutor" not in source

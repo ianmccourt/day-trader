@@ -178,7 +178,16 @@ def _migrate(conn: sqlite3.Connection) -> list[str]:
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open (and initialise, if new) the database at `db_path`."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, isolation_level=None, timeout=30.0)
+    conn = sqlite3.connect(
+        db_path,
+        isolation_level=None,
+        timeout=30.0,
+        # APScheduler's default executor is a thread pool. The cycle loop is
+        # sequential (`max_instances=1`) so sharing the connection is safe;
+        # without this, sqlite3 raises ProgrammingError and the cycle never
+        # even opens a row.
+        check_same_thread=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     _migrate(conn)

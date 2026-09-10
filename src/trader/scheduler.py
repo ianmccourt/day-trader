@@ -14,6 +14,7 @@ from collections.abc import Callable
 from datetime import datetime
 from types import FrameType
 
+from apscheduler.executors.debug import DebugExecutor
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -59,7 +60,13 @@ def run_scheduler(
         log.warning("reconciled_orphan_cycles", extra={"count": orphans})
 
     trigger = rth_trigger(cycle_minutes)
-    scheduler = BlockingScheduler(timezone=MARKET_TZ)
+    # DebugExecutor runs the job on the scheduler thread, not a worker pool.
+    # Cycles are sequential anyway; a thread pool is how sqlite3.ProgrammingError
+    # leaked out of run_cycle (connection created on the main thread).
+    scheduler = BlockingScheduler(
+        timezone=MARKET_TZ,
+        executors={"default": DebugExecutor()},
+    )
 
     def job() -> None:
         outcome = run_cycle(conn, broker, agent, risk_config=risk_config)
