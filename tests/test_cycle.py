@@ -243,3 +243,71 @@ def test_a_proposal_with_no_qty_is_rejected_not_crashed(conn, broker) -> None:
     assert outcome.status == STATUS_OK
     assert outcome.execution is not None
     assert "proposal_sanity" in {f.check for f in outcome.execution.verdict.failures}
+
+
+# --- housekeeping that now runs inside every cycle ---------------------------
+
+
+def test_fills_are_reconciled_automatically_at_cycle_start(conn, broker) -> None:
+    """`trader reconcile` still exists, but forgetting it no longer loses data."""
+    broker.prices["AAPL"] = 100.0
+    run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", 10), risk_config=RISK)
+    assert conn.execute(
+        "SELECT final_status FROM decisions WHERE broker_order_id IS NOT NULL"
+    ).fetchone()["final_status"] is None  # not yet read back
+
+    run_cycle(conn, broker, StubAgent())
+    assert conn.execute(
+        "SELECT final_status FROM decisions WHERE broker_order_id IS NOT NULL"
+    ).fetchone()["final_status"] == "filled"
+
+
+def test_a_stopped_out_positions_thesis_is_closed(conn) -> None:
+    """A broker-side stop can flatten a position between cycles; the next
+    cycle must close the thesis instead of letting it squat in state forever."""
+    empty_broker = FakeBroker()  # the position is gone
+    conn.execute(
+        "INSERT INTO theses(symbol, opened_at, rationale, invalidation_condition, status) "
+        "VALUES ('AAPL', datetime('now', '-2 hours'), 'why', 'when', 'open')"
+    )
+    run_cycle(conn, empty_broker, StubAgent())
+    assert conn.execute("SELECT status FROM theses").fetchone()["status"] == "closed"
+
+
+def test_a_freshly_written_thesis_survives_the_orphan_sweep(conn) -> None:
+    """Grace window: an order submitted moments ago may not show a position yet."""
+    empty_broker = FakeBroker()
+    conn.execute(
+        "INSERT INTO theses(symbol, opened_at, rationale, invalidation_condition, status) "
+        "VALUES ('AAPL', datetime('now'), 'why', 'when', 'open')"
+    )
+    run_cycle(conn, empty_broker, StubAgent())
+    assert conn.execute("SELECT status FROM theses").fetchone()["status"] == "open"
+
+
+def test_a_held_positions_thesis_is_not_touched(conn, broker) -> None:
+    conn.execute(
+        "INSERT INTO theses(symbol, opened_at, rationale, invalidation_condition, status) "
+        "VALUES ('AAPL', datetime('now', '-2 hours'), 'why', 'when', 'open')"
+    )
+    run_cycle(conn, broker, StubAgent())  # broker holds AAPL
+    assert conn.execute("SELECT status FROM theses").fetchone()["status"] == "open"
+
+
+def test_the_scan_reaches_the_prompt_when_a_risk_config_is_supplied(conn, broker) -> None:
+    outcome = run_cycle(conn, broker, StubAgent(), risk_config=RISK)
+    row = conn.execute(
+        "SELECT full_prompt FROM cycles WHERE cycle_id = ?", (outcome.cycle_id,)
+    ).fetchone()
+    assert "## Market scan" in row["full_prompt"]
+    assert "regime(QQQ):" in row["full_prompt"]
+
+
+def test_a_scan_failure_degrades_to_a_note_not_a_dead_cycle(conn, broker) -> None:
+    broker.fail_on = {"get_scan_data"}
+    outcome = run_cycle(conn, broker, StubAgent(), risk_config=RISK)
+    assert outcome.status == STATUS_OK
+    row = conn.execute(
+        "SELECT full_prompt FROM cycles WHERE cycle_id = ?", (outcome.cycle_id,)
+    ).fetchone()
+    assert "scan unavailable" in row["full_prompt"]

@@ -58,6 +58,17 @@ symbol_allowlist = [
     "IWM",
     "QQQ",
     "SPY",
+    # sector ETFs — breadth for the code-side scanner; one name can express a
+    # sector move without single-stock news risk
+    "GDX",
+    "SMH",
+    "XLE",
+    "XLF",
+    "XLI",
+    "XLP",
+    "XLU",
+    "XLV",
+    "XLY",
     # 3x leveraged ETFs
     "SOXL",
     "SOXS",

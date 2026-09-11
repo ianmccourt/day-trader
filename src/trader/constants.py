@@ -39,8 +39,11 @@ RTH_CLOSE = (16, 0)
 ANTHROPIC_MODEL = "claude-sonnet-5"
 
 #: Hard ceiling on assembled prompt size, enforced before every API call
-#: (SPEC.md constraint #4).
-MAX_PROMPT_TOKENS = 10_000
+#: (SPEC.md constraint #4). Raised from 10k when the precomputed market scan
+#: and open-orders sections joined the state block: their caps are worth
+#: roughly 1,700 chars (~1,100 tokens of dense table), and the point of the
+#: scan is to *reduce* tool round-trips, not to squeeze the state.
+MAX_PROMPT_TOKENS = 12_000
 
 #: Thesis rationale cap, mirrored by a CHECK constraint in the schema.
 MAX_THESIS_RATIONALE_CHARS = 800

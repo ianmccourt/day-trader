@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -23,6 +24,10 @@ class FakeBroker:
     fail_on: set[str] = field(default_factory=set)
     calls: list[str] = field(default_factory=list)
     submitted: list[dict[str, Any]] = field(default_factory=list)
+    #: Resting orders (bracket/OTO legs land here on submit_order).
+    open_orders: list[dict[str, Any]] = field(default_factory=list)
+    #: Per-symbol overrides for get_scan_data; anything absent is synthesized.
+    scan_data: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
@@ -77,6 +82,51 @@ class FakeBroker:
             for i in range(min(limit, 30))
         ]
 
+    def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Synthesized scan payloads: flat 5-minute bars from today's open."""
+        self._check("get_scan_data")
+        session_open = utcnow().astimezone(MARKET_TZ).replace(
+            hour=9, minute=30, second=0, microsecond=0
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for raw in symbols:
+            symbol = raw.upper()
+            if symbol in self.scan_data:
+                out[symbol] = self.scan_data[symbol]
+                continue
+            price = self.prices.get(symbol, self.default_price)
+            out[symbol] = {
+                "last": price,
+                "prev_close": price,
+                "today_volume": 5_000_000.0,
+                "avg_daily_volume": 5_000_000.0,
+                "bars_5min": [
+                    {
+                        "t": (session_open + timedelta(minutes=5 * i)).isoformat(),
+                        "o": price,
+                        "h": price * 1.001,
+                        "l": price * 0.999,
+                        "c": price,
+                        "v": 100_000.0,
+                    }
+                    for i in range(12)
+                ],
+            }
+        return out
+
+    def get_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        self._check("get_open_orders")
+        if symbol is None:
+            return [dict(o) for o in self.open_orders]
+        return [dict(o) for o in self.open_orders if o["symbol"] == symbol.upper()]
+
+    def cancel_open_orders(self, symbol: str) -> int:
+        self._check("cancel_open_orders")
+        keep = [o for o in self.open_orders if o["symbol"] != symbol.upper()]
+        canceled = len(self.open_orders) - len(keep)
+        self.open_orders = keep
+        return canceled
+
     def get_order(self, order_id: str) -> OrderFill:
         self._check("get_order")
         return OrderFill(
@@ -104,6 +154,34 @@ class FakeBroker:
             record["take_profit_price"] = take_profit_price
         self.submitted.append(record)
         self._apply_fill(symbol, qty, side)
+        # Bracket/OTO exits rest at the broker, like Alpaca's held legs.
+        exit_side = "sell" if side == "buy" else "buy"
+        if stop_price is not None:
+            self.open_orders.append(
+                {
+                    "order_id": f"fake-stop-{len(self.submitted)}",
+                    "symbol": symbol.upper(),
+                    "side": exit_side,
+                    "type": "stop",
+                    "qty": qty,
+                    "stop_price": stop_price,
+                    "limit_price": None,
+                    "status": "held",
+                }
+            )
+        if take_profit_price is not None:
+            self.open_orders.append(
+                {
+                    "order_id": f"fake-tp-{len(self.submitted)}",
+                    "symbol": symbol.upper(),
+                    "side": exit_side,
+                    "type": "limit",
+                    "qty": qty,
+                    "stop_price": None,
+                    "limit_price": take_profit_price,
+                    "status": "held",
+                }
+            )
         return OrderReceipt(
             order_id=f"fake-order-{len(self.submitted)}",
             status="accepted",

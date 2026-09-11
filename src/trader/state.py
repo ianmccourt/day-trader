@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
-from trader.broker import Broker, Clock
+from trader.broker import Broker, BrokerError, Clock
 from trader.constants import MARKET_TZ
 from trader.db import kill_switch_engaged, orders_for_cycle, orders_since, utcnow
+from trader.scanner import ScanRow, render_scan, scan_universe
 
 #: Hard caps on anything variable-length that reaches the prompt. These are the
 #: only reason context stays flat over a long session.
@@ -30,18 +32,21 @@ MAX_RENDERED_THESES = 8
 MAX_RENDERED_THESIS_RATIONALE = 160
 MAX_RENDERED_THESIS_INVALIDATION = 100
 MAX_RECENT_DECISIONS = 10
+MAX_RENDERED_OPEN_ORDERS = 12
 
 #: Hard ceiling on the whole rendered state, enforced at the bottom of
 #: render_state. Sized from measured token counts, not guessed: with every
-#: section at its cap this lands the first request near 4,000 tokens on prose
+#: section at its cap the pre-scan sections land near 4,000 tokens on prose
 #: and under 5,000 even on adversarial input (a model writing 800 repeated
-#: characters into a thesis tokenizes far worse than prose). Sized so the
-#: per-section caps above come in
-#: under it with room to spare — if this one ever fires, a new section grew
-#: without a cap of its own. Anything past it is cut with a visible marker and
-#: a logged warning: a degraded state block beats a failed cycle, and the token
-#: assertion in trader.llm is still the backstop.
-MAX_STATE_CHARS = 5_000
+#: characters into a thesis tokenizes far worse than prose). The market scan
+#: (MAX_RENDERED_SCAN_ROWS fixed-shape lines) and open orders
+#: (MAX_RENDERED_OPEN_ORDERS lines) add roughly 1,700 chars at their caps,
+#: which is why this ceiling and MAX_PROMPT_TOKENS both grew when the scan
+#: landed. If this fires, a new section grew without a cap of its own.
+#: Anything past it is cut with a visible marker and a logged warning: a
+#: degraded state block beats a failed cycle, and the token assertion in
+#: trader.llm is still the backstop.
+MAX_STATE_CHARS = 7_000
 
 log = logging.getLogger("trader.state")
 
@@ -70,6 +75,15 @@ class CycleContext:
     equity_delta_today: float | None
     previous_cycle: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
+    #: Precomputed market scan over the allowlist (trader.scanner). None means
+    #: no scan ran this cycle; scan_note says why.
+    scan: list[ScanRow] | None = None
+    regime: str | None = None
+    scan_note: str | None = None
+    #: Orders resting at the broker (stops, take-profits). This is how a cycle
+    #: knows whether a position is actually protected.
+    open_orders: list[dict[str, Any]] = field(default_factory=list)
+    open_orders_note: str | None = None
 
     @property
     def total_exposure(self) -> float:
@@ -96,14 +110,34 @@ def build_cycle_context(
     *,
     cycle_id: int,
     now: datetime | None = None,
+    scan_symbols: Sequence[str] | None = None,
 ) -> CycleContext:
-    """Assemble the full state for one cycle. Broker calls are allowed to raise."""
+    """Assemble the full state for one cycle. Broker calls are allowed to raise.
+
+    The clock, account, and positions are load-bearing: if they fail, the cycle
+    fails. The scan and open orders are advisory: if they fail, the state says
+    so and the cycle proceeds — a cycle without a scan can still manage risk.
+    """
     now = now or utcnow()
     day = trading_day_for(now)
 
     clock = broker.get_clock()
     account = broker.get_account()
     positions = broker.get_positions()
+
+    scan: list[ScanRow] | None = None
+    regime: str | None = None
+    scan_note: str | None = None
+    if scan_symbols and clock.is_open:
+        try:
+            scan, regime = scan_universe(broker, scan_symbols, now=now)
+        except BrokerError as exc:
+            scan_note = f"scan unavailable: {exc}"
+            log.warning("scan_failed", extra={"cycle_id": cycle_id}, exc_info=True)
+    elif scan_symbols:
+        scan_note = "scan skipped: market closed"
+
+    open_orders, open_orders_note = _read_open_orders(broker, cycle_id)
 
     theses = _rows(
         conn.execute(
@@ -148,7 +182,23 @@ def build_cycle_context(
             if len(positions) > MAX_RENDERED_POSITIONS
             else []
         ),
+        scan=scan,
+        regime=regime,
+        scan_note=scan_note,
+        open_orders=open_orders,
+        open_orders_note=open_orders_note,
     )
+
+
+def _read_open_orders(
+    broker: Broker, cycle_id: int
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Advisory read: a broker that cannot list orders degrades to a note."""
+    try:
+        return broker.get_open_orders(), None
+    except BrokerError as exc:
+        log.warning("open_orders_failed", extra={"cycle_id": cycle_id}, exc_info=True)
+        return [], f"open orders unavailable: {exc}"
 
 
 def refresh_cycle_context(
@@ -166,6 +216,7 @@ def refresh_cycle_context(
     positions = broker.get_positions()
     last_equity = account.get("last_equity")
     equity_delta = None if last_equity in (None, 0) else account["equity"] - last_equity
+    open_orders, open_orders_note = _read_open_orders(broker, ctx.cycle_id)
     return replace(
         ctx,
         account=account,
@@ -179,6 +230,8 @@ def refresh_cycle_context(
             if len(positions) > MAX_RENDERED_POSITIONS
             else []
         ),
+        open_orders=open_orders,
+        open_orders_note=open_orders_note,
     )
 
 
@@ -234,6 +287,30 @@ def render_state(ctx: CycleContext) -> str:
             f"{_money(p.get('unrealized_pl'))}"
             for p in ctx.positions
         ]
+
+    lines += ["", "## Open orders (resting at the broker: stops, take-profits)"]
+    if ctx.open_orders_note:
+        lines.append(f"({ctx.open_orders_note})")
+    elif not ctx.open_orders:
+        lines.append("(none)")
+    else:
+        for o in ctx.open_orders[:MAX_RENDERED_OPEN_ORDERS]:
+            price = o.get("stop_price") or o.get("limit_price")
+            lines.append(
+                f"- {o['symbol']} {o['side']} {o.get('qty') or '?'} {o.get('type')} "
+                f"@ {_money(price)} [{o.get('status')}]"
+            )
+        if len(ctx.open_orders) > MAX_RENDERED_OPEN_ORDERS:
+            lines.append(
+                f"({len(ctx.open_orders) - MAX_RENDERED_OPEN_ORDERS} more not rendered)"
+            )
+
+    lines += ["", "## Market scan (precomputed; opening range 09:30-09:45 ET)"]
+    if ctx.scan is None:
+        lines.append(f"({ctx.scan_note or 'no scan this cycle'})")
+    else:
+        held = {p["symbol"] for p in ctx.positions}
+        lines += render_scan(ctx.scan, regime=ctx.regime, held=held)
 
     lines += ["", "## Open theses"]
     if not ctx.theses:

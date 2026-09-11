@@ -22,12 +22,11 @@ from trader.db import (
     kill_switch_engaged,
     last_cycle,
     reconcile_orphan_cycles,
-    record_fill,
     set_flag,
-    unreconciled_orders,
     utcnow,
 )
 from trader.evaluate import EvaluationError, evaluate, format_report
+from trader.execution import reconcile_fills
 from trader.llm import AnthropicAgent
 from trader.prompts import PromptError
 from trader.risk.checks import CHECK_NAMES
@@ -227,33 +226,30 @@ def cmd_rejections(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def cmd_reconcile(settings: Settings, args: argparse.Namespace) -> int:
-    """Read submitted orders back from the broker and record their fills."""
+    """Read submitted orders back from the broker and record their fills.
+
+    The same reconciliation now also runs automatically at the top of every
+    cycle; this command remains for ad-hoc runs and for orders that were still
+    working when the loop last looked.
+    """
     conn, broker = _open(settings)
-    pending = unreconciled_orders(conn, limit=args.limit)
-    if not pending:
+    results = reconcile_fills(conn, broker, limit=args.limit)
+    if not results:
         print("nothing to reconcile")
         return 0
-    done = skipped = 0
-    for row in pending:
-        fill = broker.get_order(row["broker_order_id"])
-        if not fill.is_terminal:
-            # Still working. Leave it NULL so a later run picks it up.
-            skipped += 1
-            continue
-        record_fill(
-            conn,
-            row["id"],
-            final_status=fill.status,
-            filled_qty=fill.filled_qty,
-            filled_avg_price=fill.filled_avg_price,
-            filled_at=fill.filled_at.isoformat() if fill.filled_at else None,
-        )
-        done += 1
-        print(
-            f"  {row['symbol']:<6} {fill.status:<12} "
-            f"{fill.filled_qty:g} @ {fill.filled_avg_price or '-'}"
-        )
-    print(f"reconciled {done}, still open {skipped}")
+    for entry in results:
+        if entry["status"] == "reconciled":
+            print(
+                f"  {entry['symbol']:<6} {entry['final_status']:<12} "
+                f"{entry['filled_qty']:g} @ {entry['filled_avg_price'] or '-'}"
+            )
+        elif entry["status"] == "error":
+            print(f"  {entry['symbol']:<6} read failed: {entry['error']}")
+    done = sum(1 for e in results if e["status"] == "reconciled")
+    still_open = sum(1 for e in results if e["status"] == "open")
+    errors = sum(1 for e in results if e["status"] == "error")
+    tail = f", read errors {errors}" if errors else ""
+    print(f"reconciled {done}, still open {still_open}{tail}")
     return 0
 
 

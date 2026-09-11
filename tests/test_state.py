@@ -102,6 +102,41 @@ def test_kill_switch_state_is_visible_in_the_rendering(conn) -> None:
     assert "kill_switch: ENGAGED" in render_state(_ctx(conn, FakeBroker()))
 
 
+def test_resting_orders_are_visible_in_the_rendering(conn) -> None:
+    """The playbook asks 'does this position have a stop on file'; the state
+    must be able to answer it."""
+    broker = FakeBroker(positions=[position("AAPL", 10, 100.0)])
+    broker.submit_order(symbol="AAPL", qty=10, side="buy", stop_price=95.0)
+    rendered = render_state(_ctx(conn, broker))
+    assert "## Open orders" in rendered
+    assert "AAPL sell 10 stop @ $95.00" in rendered
+
+
+def test_an_open_orders_failure_degrades_to_a_note(conn) -> None:
+    broker = FakeBroker(fail_on={"get_open_orders"})
+    rendered = render_state(_ctx(conn, broker))
+    assert "open orders unavailable" in rendered
+
+
+def test_the_scan_is_rendered_when_symbols_are_supplied(conn) -> None:
+    broker = FakeBroker(prices={"AAPL": 100.0, "QQQ": 500.0})
+    cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
+    ctx = build_cycle_context(conn, broker, cycle_id=cycle_id, scan_symbols=["AAPL", "QQQ"])
+    rendered = render_state(ctx)
+    assert "## Market scan" in rendered
+    assert "regime(QQQ):" in rendered
+    assert "AAPL" in rendered
+
+
+def test_the_scan_is_skipped_when_the_market_is_closed(conn) -> None:
+    broker = FakeBroker(is_open=False)
+    cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
+    ctx = build_cycle_context(conn, broker, cycle_id=cycle_id, scan_symbols=["AAPL"])
+    assert ctx.scan is None
+    assert "scan skipped: market closed" in render_state(ctx)
+    assert "get_scan_data" not in broker.calls
+
+
 # --- long-horizon bounding --------------------------------------------------
 #
 # The original flatness test above only accumulated *decisions*, which are
@@ -124,13 +159,24 @@ def test_the_rendered_state_is_bounded_with_everything_at_its_cap(conn) -> None:
 
     _seed_theses(conn, 30, "r" * 800, "i" * 800)
     broker = FakeBroker(positions=[position(f"S{i:03d}", 10, 300.0, 314.0) for i in range(40)])
+    # Resting exits on every position, well past the render cap.
+    for i in range(40):
+        broker.submit_order(symbol=f"S{i:03d}", qty=10, side="buy", stop_price=290.0)
     cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
     for i in range(50):
         conn.execute(
             "INSERT INTO decisions(cycle_id, timestamp, action, symbol, qty) VALUES (?,?,?,?,?)",
             (cycle_id, f"2026-09-09T1{i % 10}:00:00+00:00", "buy", f"S{i:03d}", 10),
         )
-    rendered = render_state(build_cycle_context(conn, broker, cycle_id=cycle_id))
+    rendered = render_state(
+        build_cycle_context(
+            conn,
+            broker,
+            cycle_id=cycle_id,
+            # A scan wider than MAX_RENDERED_SCAN_ROWS, so the cap engages.
+            scan_symbols=[f"S{i:03d}" for i in range(40)],
+        )
+    )
     assert len(rendered) <= MAX_STATE_CHARS, len(rendered)
 
 

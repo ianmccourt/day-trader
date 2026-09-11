@@ -17,6 +17,7 @@ from trader.agent import Agent, AgentResult
 from trader.broker import Broker, BrokerError
 from trader.db import (
     close_cycle,
+    close_orphan_theses,
     kill_switch_engaged,
     open_cycle,
     record_account,
@@ -24,7 +25,7 @@ from trader.db import (
     record_positions,
     utcnow,
 )
-from trader.execution import ExecutionResult, build_proposal, place_order
+from trader.execution import ExecutionResult, build_proposal, place_order, reconcile_fills
 from trader.risk.config import RiskConfig
 from trader.state import build_cycle_context, trading_day_for
 
@@ -107,8 +108,26 @@ def run_cycle(
         log.warning("kill_switch_engaged", extra={"cycle_id": cycle_id})
         return finish(STATUS_HALTED_KILL_SWITCH)
 
+    # Read yesterday's (and this morning's) fills back before doing anything
+    # else, so the evaluation data stays complete without a manual
+    # `trader reconcile`. Advisory: a failed read is logged per order and the
+    # cycle proceeds.
+    reconciled = [
+        r for r in reconcile_fills(conn, broker, limit=50) if r["status"] == "reconciled"
+    ]
+    if reconciled:
+        log.info(
+            "auto_reconciled_fills", extra={"cycle_id": cycle_id, "count": len(reconciled)}
+        )
+
     try:
-        ctx = build_cycle_context(conn, broker, cycle_id=cycle_id, now=started)
+        ctx = build_cycle_context(
+            conn,
+            broker,
+            cycle_id=cycle_id,
+            now=started,
+            scan_symbols=sorted(risk_config.symbol_allowlist) if risk_config else None,
+        )
     except BrokerError as exc:
         # A broker timeout fails the cycle loudly rather than silently skipping.
         log.error("broker_error", extra={"cycle_id": cycle_id}, exc_info=True)
@@ -117,6 +136,12 @@ def run_cycle(
     record_account(conn, cycle_id, ctx.account)
     if ctx.positions:
         record_positions(conn, cycle_id, ctx.positions)
+
+    # A broker-side stop or take-profit may have flattened a position since
+    # the last cycle; its thesis would otherwise stay open forever.
+    orphans = close_orphan_theses(conn, [p["symbol"] for p in ctx.positions])
+    if orphans:
+        log.info("closed_orphan_theses", extra={"cycle_id": cycle_id, "count": orphans})
 
     if not ctx.clock.is_open and not force:
         log.info(

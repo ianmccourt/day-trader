@@ -2,8 +2,11 @@ Here is the current state of the account and the session.
 
 {state}
 
-Follow the system playbook this cycle: open risk first, then scan with
-`get_quote` and `get_bars` before deciding. Either call `place_order` (up to
-the per-cycle limit) with stop and take-profit on any new entry, or end your
-turn with a short explanation of why you are not trading — after you have
-looked.
+Follow the system playbook this cycle: open risk first (check `## Open orders`
+for stops), then read the precomputed `## Market scan` for the regime and
+ranked candidates — do not re-scan with quotes. Confirm at most one candidate
+with `get_quote` plus one `get_bars` `5Min` limit 12 pull. Do not keep calling
+`get_bars` if a result says the tool-output budget is exhausted. Then either
+`place_order` (up to the per-cycle limit) with stop and take-profit on any new
+entry, or end your turn with a short explanation of why you are not trading —
+after you have looked.

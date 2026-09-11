@@ -16,7 +16,7 @@ import json
 import logging
 import threading
 import webbrowser
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -787,6 +787,27 @@ class RobinhoodMcpBroker:
             _assign(args, tool, _LIMIT_KEYS, max(1, min(int(limit), MAX_BARS)))
             raw = await self._call(session, tool, args)
             return _parse_bars(raw)[: max(1, min(int(limit), MAX_BARS))]
+
+    def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Not supported over the Agentic MCP; the scan degrades to a note.
+
+        Batched snapshot/bars endpoints have no capability mapping here, and
+        sweeping the allowlist one `get_bars` call at a time would be dozens of
+        MCP round-trips per cycle. Callers (trader.state) catch this and render
+        "scan unavailable" instead of failing the cycle.
+        """
+        raise BrokerError("market scan is not supported by the Robinhood MCP adapter")
+
+    def get_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """No open-orders capability is mapped; fail closed with a clear reason.
+
+        trader.state degrades this to a rendered note rather than a dead cycle.
+        """
+        raise BrokerError("open-order listing is not supported by the Robinhood MCP adapter")
+
+    def cancel_open_orders(self, symbol: str) -> int:
+        """No cancel capability is mapped. execution.place_order logs and proceeds."""
+        raise BrokerError("order cancellation is not supported by the Robinhood MCP adapter")
 
     def submit_order(
         self,

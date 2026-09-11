@@ -389,6 +389,98 @@ def test_a_partial_sell_leaves_the_thesis_open(conn, broker) -> None:
     assert conn.execute("SELECT status FROM theses").fetchone()["status"] == "open"
 
 
+def test_a_partial_sell_keeps_the_original_rationale(conn, broker) -> None:
+    """The exit note must not overwrite what the next cycle needs to judge
+    the remainder."""
+    broker.positions = [position("AAPL", 10, 100.0, 100.0)]
+    conn.execute(
+        "INSERT INTO theses(symbol, opened_at, rationale, invalidation_condition, status) "
+        "VALUES ('AAPL', datetime('now'), 'the entry thesis', 'when', 'open')"
+    )
+    client = FakeAnthropic(
+        [
+            tool_response(
+                (
+                    WRITE_TOOL,
+                    {
+                        "action": "sell",
+                        "symbol": "AAPL",
+                        "qty": 4,
+                        "reasoning": "trimming half",
+                        "invalidation_condition": "n/a",
+                    },
+                )
+            ),
+            text_response("Trimmed."),
+        ]
+    )
+    agent, ctx = make(conn, broker, client)
+    agent.run(ctx)
+    assert conn.execute("SELECT rationale FROM theses").fetchone()["rationale"] == (
+        "the entry thesis"
+    )
+
+
+SHORTS_CONFIG = replace(CONFIG, allow_shorts=True)
+
+
+def test_a_short_entry_stores_a_thesis(conn, broker) -> None:
+    """A sell that opens a short needs a thesis exactly as much as a buy —
+    without one, the next cycle's playbook flattens the position on sight."""
+    client = FakeAnthropic(
+        [
+            tool_response(
+                (
+                    WRITE_TOOL,
+                    {
+                        "action": "sell",
+                        "symbol": "AAPL",
+                        "qty": 5,
+                        "reasoning": "shorting the breakdown",
+                        "invalidation_condition": "close back above 101",
+                    },
+                )
+            ),
+            text_response("Short on."),
+        ]
+    )
+    agent, ctx = make(conn, broker, client, config=SHORTS_CONFIG)
+    result = agent.run(ctx)
+    assert result.executions[0].executed
+    row = conn.execute("SELECT symbol, status, rationale FROM theses").fetchone()
+    assert (row["symbol"], row["status"]) == ("AAPL", "open")
+    assert row["rationale"] == "shorting the breakdown"
+
+
+def test_a_buy_to_cover_closes_the_short_thesis_and_creates_none(conn, broker) -> None:
+    broker.positions = [position("AAPL", -10, 100.0, 100.0)]
+    conn.execute(
+        "INSERT INTO theses(symbol, opened_at, rationale, invalidation_condition, status) "
+        "VALUES ('AAPL', datetime('now'), 'short thesis', 'when', 'open')"
+    )
+    client = FakeAnthropic(
+        [
+            tool_response(
+                (
+                    WRITE_TOOL,
+                    {
+                        "action": "buy",
+                        "symbol": "AAPL",
+                        "qty": 10,
+                        "reasoning": "covering",
+                        "invalidation_condition": "n/a",
+                    },
+                )
+            ),
+            text_response("Covered."),
+        ]
+    )
+    agent, ctx = make(conn, broker, client, config=SHORTS_CONFIG)
+    agent.run(ctx)
+    rows = conn.execute("SELECT status FROM theses").fetchall()
+    assert [r["status"] for r in rows] == ["closed"]
+
+
 # --- the context budget ----------------------------------------------------
 
 
@@ -396,7 +488,7 @@ def test_the_budget_is_checked_before_the_first_api_call(conn, broker) -> None:
     client = FakeAnthropic([text_response("hi")], token_counts=[MAX_PROMPT_TOKENS + 1])
     agent, ctx = make(conn, broker, client)
 
-    with pytest.raises(ContextBudgetExceeded, match="over the 10000 budget"):
+    with pytest.raises(ContextBudgetExceeded, match=f"over the {MAX_PROMPT_TOKENS} budget"):
         agent.run(ctx)
     assert client.requests == []  # nothing was sent
 

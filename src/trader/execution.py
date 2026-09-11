@@ -10,14 +10,17 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
+from typing import Any
 
 from trader.broker import Broker, BrokerError, OrderReceipt
 from trader.db import (
     get_flag,
     kill_switch_engaged,
     record_decision,
+    record_fill,
     record_risk_event,
     set_flag,
+    unreconciled_orders,
 )
 from trader.risk.config import RiskConfig
 from trader.risk.engine import Verdict, evaluate
@@ -91,6 +94,62 @@ def build_proposal(
     )
 
 
+def _reduces_position(*, ctx: CycleContext, proposal: Proposal) -> bool:
+    """True when the order shrinks, flattens, or reverses an existing position."""
+    held = ctx.position_for(proposal.symbol)
+    if held is None:
+        return False
+    held_qty = float(held.get("qty") or 0.0)
+    signed = proposal.qty if proposal.action == "buy" else -proposal.qty
+    return held_qty * signed < 0
+
+
+def reconcile_fills(
+    conn: sqlite3.Connection, broker: Broker, *, limit: int = 200
+) -> list[dict[str, Any]]:
+    """Read submitted orders back from the broker and record terminal fills.
+
+    Returns one entry per pending order: status "reconciled" for a recorded
+    terminal fill, "open" for an order still working (left NULL for a later
+    run), "error" if the broker read failed. Called automatically at the top
+    of every cycle and by `trader reconcile`.
+    """
+    results: list[dict[str, Any]] = []
+    for row in unreconciled_orders(conn, limit=limit):
+        entry: dict[str, Any] = {"symbol": row["symbol"], "order_id": row["broker_order_id"]}
+        try:
+            fill = broker.get_order(row["broker_order_id"])
+        except BrokerError as exc:
+            log.warning(
+                "reconcile_read_failed",
+                extra={"order_id": row["broker_order_id"]},
+                exc_info=True,
+            )
+            results.append(entry | {"status": "error", "error": str(exc)})
+            continue
+        if not fill.is_terminal:
+            results.append(entry | {"status": "open"})
+            continue
+        record_fill(
+            conn,
+            row["id"],
+            final_status=fill.status,
+            filled_qty=fill.filled_qty,
+            filled_avg_price=fill.filled_avg_price,
+            filled_at=fill.filled_at.isoformat() if fill.filled_at else None,
+        )
+        results.append(
+            entry
+            | {
+                "status": "reconciled",
+                "final_status": fill.status,
+                "filled_qty": fill.filled_qty,
+                "filled_avg_price": fill.filled_avg_price,
+            }
+        )
+    return results
+
+
 def place_order(
     conn: sqlite3.Connection,
     broker: Broker,
@@ -112,6 +171,33 @@ def place_order(
     )
 
     verdict = evaluate(proposal, state)
+
+    # An approved order that reduces or flattens a position must first cancel
+    # that symbol's resting exits: the broker reserves shares held by bracket
+    # legs, so the reducing order would otherwise bounce with "insufficient
+    # qty available". Never done for orders that open or add — their exits
+    # should keep resting. Runs only after the risk verdict, so a rejected
+    # proposal cannot strip a position of its protection.
+    if verdict.approved and _reduces_position(ctx=live, proposal=proposal):
+        try:
+            canceled = broker.cancel_open_orders(proposal.symbol)
+            if canceled:
+                log.info(
+                    "canceled_resting_orders",
+                    extra={
+                        "cycle_id": ctx.cycle_id,
+                        "symbol": proposal.symbol,
+                        "count": canceled,
+                    },
+                )
+        except BrokerError:
+            # Proceed: the broker may still accept the order, and if it
+            # rejects it the position keeps its resting exits.
+            log.warning(
+                "cancel_resting_orders_failed",
+                extra={"cycle_id": ctx.cycle_id, "symbol": proposal.symbol},
+                exc_info=True,
+            )
 
     for failure in verdict.failures:
         record_risk_event(

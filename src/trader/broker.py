@@ -8,18 +8,28 @@ new caller fails the build.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
+from alpaca.data.requests import (
+    StockBarsRequest,
+    StockLatestTradeRequest,
+    StockSnapshotRequest,
+)
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+)
 
-from trader.constants import ALPACA_PAPER_BASE_URL
+from trader.constants import ALPACA_PAPER_BASE_URL, MARKET_TZ
 from trader.db import iso, utcnow
 
 #: Bar granularities the agent may request. Deliberately coarse — this is a
@@ -80,6 +90,9 @@ class Broker(Protocol):
     def get_positions(self) -> list[dict[str, Any]]: ...
     def get_latest_price(self, symbol: str) -> float: ...
     def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]: ...
+    def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]: ...
+    def get_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]: ...
+    def cancel_open_orders(self, symbol: str) -> int: ...
     def submit_order(
         self,
         *,
@@ -222,6 +235,156 @@ class AlpacaBroker:
             }
             for bar in bars.data.get(symbol, [])[-limit:]
         ]
+
+    def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Batched market data for the code-side scanner. Read-only.
+
+        Three vendor requests regardless of universe size: one snapshot batch
+        (last trade, today's daily bar, prior close), one daily-bars batch
+        (average volume), one intraday 5-minute batch since today's open. The
+        scanner itself (trader.scanner) does all the arithmetic — this method
+        only fetches, so the SDK stays confined to this module.
+        """
+        symbols = [s.strip().upper() for s in symbols if s and s.strip()]
+        if not symbols:
+            return {}
+        now = datetime.now(UTC)
+        try:
+            snapshots = self._data.get_stock_snapshot(
+                StockSnapshotRequest(symbol_or_symbols=symbols)
+            )
+        except Exception as exc:
+            raise BrokerError(f"get_scan_data snapshot failed: {exc}") from exc
+        # Daily bars for average volume. Reach back generously; incomplete
+        # today-bars are excluded downstream by comparing dates.
+        try:
+            daily = self._data.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=symbols,
+                    timeframe=TimeFrame(1, TimeFrameUnit.Day),
+                    start=now - timedelta(days=25),
+                )
+            )
+        except Exception as exc:
+            raise BrokerError(f"get_scan_data daily bars failed: {exc}") from exc
+        # Today's 5-minute bars from the exchange-local open.
+        session_open = now.astimezone(MARKET_TZ).replace(
+            hour=9, minute=30, second=0, microsecond=0
+        )
+        try:
+            intraday = self._data.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=symbols,
+                    timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                    start=session_open,
+                )
+            )
+        except Exception as exc:
+            raise BrokerError(f"get_scan_data intraday bars failed: {exc}") from exc
+
+        def _bar_dicts(bars: list[Any]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "t": b.timestamp.isoformat(),
+                    "o": float(b.open),
+                    "h": float(b.high),
+                    "l": float(b.low),
+                    "c": float(b.close),
+                    "v": float(b.volume),
+                }
+                for b in bars
+            ]
+
+        today = now.astimezone(MARKET_TZ).date()
+        out: dict[str, dict[str, Any]] = {}
+        for symbol in symbols:
+            snap = snapshots.get(symbol)
+            daily_bars = daily.data.get(symbol, [])
+            prior_volumes = [
+                float(b.volume)
+                for b in daily_bars
+                if b.timestamp.astimezone(MARKET_TZ).date() < today
+            ][-10:]
+            # Today's volume comes from the *daily bars* response, not the
+            # snapshot: on these keys the snapshot's daily bar is IEX-only
+            # (~1% of consolidated volume for SPY) while the historical bars
+            # are consolidated. Mixing the two feeds made every vol_ratio
+            # read ~0.0x — measured live on 2026-09-11.
+            today_volume = next(
+                (
+                    float(b.volume)
+                    for b in reversed(daily_bars)
+                    if b.timestamp.astimezone(MARKET_TZ).date() == today
+                ),
+                None,
+            )
+            out[symbol] = {
+                "last": (
+                    float(snap.latest_trade.price)
+                    if snap and snap.latest_trade and snap.latest_trade.price is not None
+                    else None
+                ),
+                "prev_close": (
+                    float(snap.previous_daily_bar.close)
+                    if snap and snap.previous_daily_bar
+                    else None
+                ),
+                "today_volume": today_volume,
+                "avg_daily_volume": (
+                    sum(prior_volumes) / len(prior_volumes) if prior_volumes else None
+                ),
+                "bars_5min": _bar_dicts(intraday.data.get(symbol, [])),
+            }
+        return out
+
+    def get_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Open (including held bracket-leg) orders, optionally for one symbol.
+
+        Read-only. This is how the agent — and the flatten path — can see the
+        stops and take-profits resting at the broker between cycles.
+        """
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            symbols=[symbol.upper()] if symbol else None,
+            limit=100,
+        )
+        try:
+            raw = self._client.get_orders(filter=request)
+        except Exception as exc:
+            raise BrokerError(f"get_open_orders failed: {exc}") from exc
+        return [
+            {
+                "order_id": str(o.id),
+                "symbol": o.symbol,
+                "side": str(getattr(o.side, "value", o.side)),
+                "type": str(getattr(o.order_type, "value", o.order_type)),
+                "qty": _f(o.qty),
+                "stop_price": _f(o.stop_price),
+                "limit_price": _f(o.limit_price),
+                "status": str(getattr(o.status, "value", o.status)),
+            }
+            for o in raw
+        ]
+
+    def cancel_open_orders(self, symbol: str) -> int:
+        """Cancel every open order for one symbol. Returns how many.
+
+        Called by execution.place_order before an approved order that reduces
+        or flattens a position: Alpaca reserves shares held by resting bracket
+        legs, so a flatten without this bounces with "insufficient qty".
+        Cancelling a protective exit and then failing to flatten is logged
+        loudly by the caller.
+        """
+        canceled = 0
+        for order in self.get_open_orders(symbol):
+            try:
+                self._client.cancel_order_by_id(order["order_id"])
+                canceled += 1
+            except Exception as exc:
+                raise BrokerError(
+                    f"cancel_open_orders({symbol}) failed on {order['order_id']}: {exc}"
+                ) from exc
+        return canceled
 
     def submit_order(
         self,

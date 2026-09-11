@@ -421,6 +421,35 @@ def kill_switch_engaged(conn: sqlite3.Connection) -> bool:
     return (get_flag(conn, KILL_SWITCH) or "0") == "1"
 
 
+def close_orphan_theses(
+    conn: sqlite3.Connection,
+    held_symbols: Sequence[str],
+    *,
+    grace_minutes: int = 10,
+) -> int:
+    """Close open theses whose position no longer exists.
+
+    A broker-side stop or take-profit can flatten a position between cycles;
+    nothing else would ever close its thesis, so stale theses would accumulate
+    and squat in the rendered state forever. The grace window keeps a thesis
+    written moments ago (order submitted, fill not yet visible) from being
+    closed by the same cycle that created it.
+    """
+    held = sorted({s.upper() for s in held_symbols})
+    placeholders = ",".join("?" for _ in held)
+    not_held = f"AND symbol NOT IN ({placeholders})" if held else ""
+    cur = conn.execute(
+        f"""
+        UPDATE theses SET status = 'closed', closed_at = datetime('now'),
+            updated_at = datetime('now')
+        WHERE status = 'open' {not_held}
+          AND COALESCE(updated_at, opened_at) <= datetime('now', ?)
+        """,
+        (*held, f"-{int(grace_minutes)} minutes"),
+    )
+    return cur.rowcount
+
+
 def unreconciled_orders(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
     """Submitted orders whose terminal state we have not read back yet."""
     return conn.execute(

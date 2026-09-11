@@ -74,3 +74,8 @@ def test_the_system_prompt_is_the_playbook() -> None:
         "invalidation",
     ):
         assert required in system, f"playbook missing {required!r}"
+    # Fat bar pulls blow the prompt budget (cycles 69-72, 2026-09-11).
+    assert "limit 20" not in system
+    assert "limit 30" not in system
+    assert "limit 8" in system
+    assert "limit 12" in system

@@ -78,7 +78,7 @@ uv run trader --risk-config risk.conservative.toml run
 | `max_daily_loss` | $2,000 | **$10,000** |
 | `max_orders_per_hour` / `per_day` | 6 / 20 | **20 / 100** |
 | `max_orders_per_cycle` | 1 | **4** |
-| allowlist | 5 large caps | **21 names incl. 3x ETFs** |
+| allowlist | 5 large caps | **30 names incl. sector + 3x ETFs** |
 | `allow_shorts` | false | **true** |
 
 Against ~$100k paper equity with 4x day-trading buying power (~$399k), that is
@@ -191,6 +191,10 @@ The events worth knowing by name:
 | `state_render_truncated` | a state section grew past its cap — investigate |
 | `tool_result_budget_exhausted` | the model over-used tools this cycle |
 | `reconciled_orphan_cycles` | expected once after an unclean shutdown, not routinely |
+| `scan_failed` | the market scan degraded to a note; the cycle still ran |
+| `auto_reconciled_fills` | cycle start read fills back from the broker |
+| `closed_orphan_theses` | a stop-out flattened a position between cycles |
+| `canceled_resting_orders` | a reducing order cleared the symbol's exits first |
 
 ### Check on it
 
@@ -222,6 +226,12 @@ every order — not taken from the cycle context. There is no override.
 uv run trader reconcile               # read fills back from the broker
 uv run trader evaluate --start 2026-09-14 --end 2026-09-18
 ```
+
+Reconciliation also runs automatically at the top of every cycle (up to 50
+pending orders, failures logged per order and skipped), so forgetting the
+manual command no longer leaves the evaluation data incomplete. The command
+remains for ad-hoc runs and for orders still working when the loop last
+looked.
 
 ### What to actually watch for
 
@@ -363,6 +373,38 @@ mandatory `get_quote`/`get_bars` before a new order, size from the stop, and a
 hard stop plus take-profit on every entry. The risk layer still does not pick
 trades. Editing the prompt while the loop is live has no effect until restart.
 
+### The market scan: breadth lives in code, not in the tool budget
+
+The tool budget can afford roughly two `get_bars` calls per cycle, which used
+to cap how much of the market the agent could *see* at two symbols. Breadth now
+comes precomputed: `trader/scanner.py` sweeps the entire allowlist each cycle
+through one batched broker method (`get_scan_data` — three vendor requests
+total, regardless of universe size) and renders a compact table into the state
+block: last price, % change vs prior close, volume pace vs the 10-day average
+adjusted for time of day, the 09:30–09:45 opening range with the symbol's
+position relative to it (judged from the last *closed* 5-minute bar — wicks do
+not count), and distance from the rough session VWAP. The QQQ regime
+(`up`/`down`/`chop`) is classified in code on the first line. Held names sort
+first, then names outside their opening range, then by |% change|; rendered
+rows are capped at 20.
+
+Volume note, measured live: on these keys the snapshot's daily bar is IEX-only
+(~1% of SPY's consolidated volume) while historical daily bars are
+consolidated, so today's volume is read from the daily-bars response and the
+ratio is pro-rated by session time elapsed — `vol_x` ≈ 1 means "normal pace
+for this time of day".
+
+The scan is advisory: if it fails, the state says `scan unavailable`, the
+cycle proceeds, and the playbook falls back to tools for the one or two names
+that matter. The Robinhood MCP adapter has no batched data endpoint, so it
+degrades this way by design. Everything in `scanner.py` is a pure function
+over plain dicts — no vendor SDK imports (test_no_bypass.py keeps alpaca-py
+confined to `broker.py`).
+
+The state block also gained `## Open orders` — the stops and take-profits
+actually resting at the broker — so "does this position have a stop on file"
+is finally answerable, which the playbook's orphan rule needs.
+
 ### The tool surface
 
 Read tools first, then the single write tool — in that order in the tool list,
@@ -387,17 +429,42 @@ At most `max_orders_per_cycle` orders per cycle. A further call comes back as an
 error result, not an order. Optional `stop_price` and `take_profit_price` ride
 on the entry as a broker-side OTO or bracket.
 
+**Reducing orders cancel the resting exits first.** Alpaca reserves the shares
+held by bracket legs, so a flatten used to bounce with "insufficient qty
+available" — the agent could enter protected positions but not exit them.
+`execution.place_order` now cancels the symbol's open orders before submitting
+any order that shrinks, flattens, or reverses a position. Only after the risk
+verdict approves (a rejected proposal cannot strip a position's protection),
+and never for orders that open or add.
+
+### Theses follow the position, not the verb
+
+Thesis lifecycle is keyed on the *resulting signed position*, not on buy/sell:
+a sell that opens a short stores a thesis (without one, the next cycle's
+playbook would flatten it on sight); a buy-to-cover that flattens closes the
+thesis and creates none; a partial exit keeps the original entry rationale
+rather than overwriting it with "trimming half". And because a broker-side
+stop can flatten a position between cycles with nobody to close its thesis,
+every cycle starts with an orphan sweep: open theses with no matching position
+(and older than a 10-minute grace window) are closed and logged.
+
 ### The context budget
 
-`MAX_PROMPT_TOKENS = 10_000`, asserted before **every** request in the loop, not
+`MAX_PROMPT_TOKENS = 12_000`, asserted before **every** request in the loop, not
 just the first — tool results accumulate, so the last iteration is the one that
 would blow it. Counted through the API's own `count_tokens` with the real
 system, messages, and tools; a local estimate that drifts from the server's
 count would make the assertion meaningless. Over budget raises
 `ContextBudgetExceeded` and the cycle aborts *before* the API call.
 
-Measured, not estimated. Live runs against the paper account, plus a
-worst-case synthetic state with every section at its cap:
+The budget was 10,000 before the market scan and open-orders sections joined
+the state block; their render caps are worth roughly 1,700 chars (~1,100
+tokens of dense table), and the scan exists to *reduce* tool round-trips, not
+to squeeze the state. `MAX_STATE_CHARS` grew 5,000 → 7,000 for the same
+reason, and the worst-case bounding test now renders both new sections at
+their caps.
+
+Measured, not estimated (pre-scan numbers; add ~1,100 tokens for a full scan):
 
 | | tokens |
 | --- | --- |
@@ -406,7 +473,7 @@ worst-case synthetic state with every section at its cap:
 | Worst case: 25 positions, 20 theses, 30 decisions | 4,172 |
 | ...plus a fully-spent tool-result budget | 6,824 |
 | ...adversarial (800 repeated chars per thesis) | 8,280 |
-| Budget | 10,000 |
+| Budget | 12,000 |
 
 Every variable-length section is capped **by bytes, not just by count** — see
 "Long horizons" below for why that distinction cost a bug.
@@ -571,7 +638,7 @@ Nothing was dropped or renamed. Additions:
 
 ## Tests
 
-`uv run pytest` — 266 tests, ruff clean. The structural invariants are worth
+`uv run pytest` — 300 tests, ruff clean. The structural invariants are worth
 knowing about, because they fail the build rather than relying on review:
 
 | File | Guards |
@@ -580,10 +647,12 @@ knowing about, because they fail the build rather than relying on review:
 | `test_no_bypass.py` | one caller of `submit_order`, `evaluate` dominates it, no skip argument, one write tool, no shell/HTTP in the tool layer |
 | `test_risk_checks.py` | every check: passing, failing, boundary |
 | `test_risk_adversarial.py` | the hostile battery through the real execution path |
-| `test_llm.py` | tool loop, one-order rule, budget asserted every iteration |
+| `test_llm.py` | tool loop, one-order rule, budget asserted every iteration, thesis lifecycle incl. shorts |
 | `test_prompts.py` | no prompt text inline in `src/`, playbook present in `prompts/system.txt` |
 | `test_evaluate.py` | FIFO matching, window boundaries, and every case the report refuses to guess |
-| `test_state.py` | the rendering stays bounded by bytes as theses accumulate |
+| `test_state.py` | the rendering stays bounded by bytes as theses, scan rows and open orders accumulate |
+| `test_scanner.py` | opening range, closed-bar OR position, VWAP, prorated volume, regime |
+| `test_execution.py` | reducing orders cancel resting exits (and only then); auto-reconcile records terminal fills |
 
 ## What has actually been run
 

@@ -181,12 +181,27 @@ def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     except BrokerError as exc:
         raise ToolError(f"could not price {symbol}: {exc}") from exc
 
+    # The position *before* this order decides the thesis lifecycle below.
+    # Derived arithmetically rather than re-read after the fill: the broker's
+    # position report can lag a just-submitted market order, and a thesis
+    # decision must not depend on that race.
+    prior = tc.ctx.position_for(proposal.symbol)
+    prior_qty = float(prior["qty"]) if prior else 0.0
+
     result = place_order(tc.conn, tc.broker, tc.ctx, proposal, tc.config)
     tc.executions.append(result)
 
     if result.executed:
         tc.ctx = refresh_cycle_context(tc.conn, tc.broker, tc.ctx)
-        _record_thesis(tc, proposal.symbol, action, reasoning, invalidation)
+        signed = proposal.qty if action == "buy" else -proposal.qty
+        _record_thesis(
+            tc,
+            proposal.symbol,
+            prior_qty=prior_qty,
+            resulting_qty=prior_qty + signed,
+            reasoning=reasoning,
+            invalidation=invalidation,
+        )
 
     return {
         "approved": result.verdict.approved,
@@ -200,23 +215,31 @@ def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _record_thesis(
-    tc: ToolContext, symbol: str, action: str, reasoning: str, invalidation: str
+    tc: ToolContext,
+    symbol: str,
+    *,
+    prior_qty: float,
+    resulting_qty: float,
+    reasoning: str,
+    invalidation: str,
 ) -> None:
     """Thesis writes ride along with an executed order.
 
     Deliberately not a second write tool: SPEC.md allows exactly one, and a
     thesis with no position behind it is not worth storing.
+
+    Keyed on the *resulting signed position*, not on buy/sell — a sell that
+    opens a short needs a thesis exactly as much as a buy that opens a long,
+    and a buy-to-cover that flattens a short must close one, not create one.
     """
-    rationale = (reasoning or "(none given)")[:MAX_THESIS_RATIONALE_CHARS]
-    condition = (invalidation or "(none given)")[:MAX_THESIS_RATIONALE_CHARS]
     existing = tc.conn.execute(
         "SELECT id FROM theses WHERE symbol = ? AND status = 'open'", (symbol,)
     ).fetchone()
 
-    if action == "sell":
-        position = tc.ctx.position_for(symbol)
-        remaining = float(position["qty"]) if position else 0.0
-        if existing and remaining <= 0:
+    if abs(resulting_qty) < 1e-9:
+        # Flat: the position is gone, so its thesis closes. Never inserts —
+        # a flattening order's reasoning is an exit note, not a new thesis.
+        if existing:
             tc.conn.execute(
                 "UPDATE theses SET status = 'closed', closed_at = datetime('now'), "
                 "updated_at = datetime('now') WHERE id = ?",
@@ -224,6 +247,15 @@ def _record_thesis(
             )
         return
 
+    reduced = abs(resulting_qty) < abs(prior_qty) and prior_qty * resulting_qty > 0
+    if reduced:
+        # A partial exit keeps the original thesis: overwriting the entry
+        # rationale with "trimming half" would destroy what the next cycle
+        # needs to judge the remainder.
+        return
+
+    rationale = (reasoning or "(none given)")[:MAX_THESIS_RATIONALE_CHARS]
+    condition = (invalidation or "(none given)")[:MAX_THESIS_RATIONALE_CHARS]
     if existing:
         tc.conn.execute(
             "UPDATE theses SET rationale = ?, invalidation_condition = ?, "
