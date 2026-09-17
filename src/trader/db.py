@@ -319,6 +319,41 @@ def record_positions(
     )
 
 
+def current_positions(
+    conn: sqlite3.Connection,
+) -> tuple[int | None, str | None, list[sqlite3.Row]]:
+    """Holdings as of the latest account snapshot.
+
+    `record_positions` writes no rows when the book is empty, so
+    `MAX(positions_snapshot.cycle_id)` is the last cycle that still held
+    something — which stays on the dashboard after a flatten fills. Account
+    snapshots land every cycle, empty book or not, and are the clock for
+    'what do we hold now'.
+    """
+    account = conn.execute(
+        "SELECT cycle_id, captured_at FROM account_snapshot "
+        "ORDER BY cycle_id DESC LIMIT 1"
+    ).fetchone()
+    if account is None:
+        row = conn.execute(
+            "SELECT MAX(cycle_id) AS cycle_id FROM positions_snapshot"
+        ).fetchone()
+        cycle_id = None if row is None else row["cycle_id"]
+        if cycle_id is None:
+            return None, None, []
+        return cycle_id, None, _positions_for_cycle(conn, int(cycle_id))
+    cycle_id = int(account["cycle_id"])
+    return cycle_id, str(account["captured_at"]), _positions_for_cycle(conn, cycle_id)
+
+
+def _positions_for_cycle(conn: sqlite3.Connection, cycle_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT symbol, qty, avg_price, current_price, market_value, unrealized_pl "
+        "FROM positions_snapshot WHERE cycle_id = ?",
+        (cycle_id,),
+    ).fetchall()
+
+
 # --- decisions & risk ------------------------------------------------------
 
 
@@ -380,11 +415,13 @@ def orders_since(conn: sqlite3.Connection, since: datetime) -> int:
 
     Sourced from our own decisions table rather than the broker, because the
     rate limits in risk.yaml are about what the agent did, and the broker has no
-    idea which of its orders came from us.
+    idea which of its orders came from us. Broker-side stop/take-profit fills
+    are recorded as `broker_exit:` rows and must not consume the rate budget.
     """
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM decisions "
-        "WHERE broker_order_id IS NOT NULL AND timestamp >= ?",
+        "WHERE broker_order_id IS NOT NULL AND timestamp >= ? "
+        "AND IFNULL(outcome, '') NOT LIKE 'broker_exit:%'",
         (iso(since),),
     ).fetchone()
     return int(row["n"])
@@ -394,10 +431,21 @@ def orders_for_cycle(conn: sqlite3.Connection, cycle_id: int) -> int:
     """Submitted orders (those with a broker id) attributed to this cycle."""
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM decisions "
-        "WHERE cycle_id = ? AND broker_order_id IS NOT NULL",
+        "WHERE cycle_id = ? AND broker_order_id IS NOT NULL "
+        "AND IFNULL(outcome, '') NOT LIKE 'broker_exit:%'",
         (cycle_id,),
     ).fetchone()
     return int(row["n"])
+
+
+def symbols_traded_since(conn: sqlite3.Connection, since: datetime) -> frozenset[str]:
+    """Tickers that already had a submitted (or broker-exit) order since `since`."""
+    rows = conn.execute(
+        "SELECT DISTINCT symbol FROM decisions "
+        "WHERE broker_order_id IS NOT NULL AND timestamp >= ? AND symbol IS NOT NULL",
+        (iso(since),),
+    ).fetchall()
+    return frozenset(str(r["symbol"]).upper() for r in rows)
 
 
 # --- flags / kill switch ---------------------------------------------------

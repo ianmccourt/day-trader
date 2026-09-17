@@ -13,8 +13,11 @@ import time
 import traceback
 from dataclasses import dataclass
 
+from datetime import datetime
+
 from trader.agent import Agent, AgentResult
 from trader.broker import Broker, BrokerError
+from trader.constants import MARKET_TZ, NO_NEW_ENTRIES_AFTER_ET
 from trader.db import (
     close_cycle,
     close_orphan_theses,
@@ -35,7 +38,19 @@ log = logging.getLogger("trader.cycle")
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
 STATUS_SKIPPED_CLOSED = "skipped_market_closed"
+STATUS_SKIPPED_NO_ENTRY = "skipped_no_entry_window"
 STATUS_HALTED_KILL_SWITCH = "halted_kill_switch"
+
+
+def _past_entry_window(clock_now: datetime) -> bool:
+    """True once the exchange-local clock passes NO_NEW_ENTRIES_AFTER_ET.
+
+    Takes the *broker's* clock timestamp, not the host's: the broker clock is
+    already the authority for the market-open gate, and it is the injectable
+    one in tests.
+    """
+    local = clock_now.astimezone(MARKET_TZ)
+    return (local.hour, local.minute) >= NO_NEW_ENTRIES_AFTER_ET
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +149,9 @@ def run_cycle(
         return finish(STATUS_ERROR, error=f"{type(exc).__name__}: {exc}")
 
     record_account(conn, cycle_id, ctx.account)
+    # Empty books write no rows. Status and the dashboard read positions for
+    # the latest account_snapshot cycle — not MAX(positions_snapshot.cycle_id)
+    # — so a flatten does not leave yesterday's lot on the panel.
     if ctx.positions:
         record_positions(conn, cycle_id, ctx.positions)
 
@@ -148,6 +166,21 @@ def run_cycle(
             "market_closed", extra={"cycle_id": cycle_id, "next_open": str(ctx.clock.next_open)}
         )
         return finish(STATUS_SKIPPED_CLOSED)
+
+    # After the playbook's last entry window, a flat book with no resting
+    # orders has exactly one legal decision: no_action. Skip the LLM call and
+    # say so, instead of paying a full cycle to hear it. Requires the
+    # open-orders read to have *succeeded* (an empty-because-errored list is
+    # not evidence of flatness), and `force` bypasses it like the market gate.
+    if (
+        not force
+        and _past_entry_window(ctx.clock.timestamp)
+        and not ctx.positions
+        and not ctx.open_orders
+        and ctx.open_orders_note is None
+    ):
+        log.info("no_entry_window_flat", extra={"cycle_id": cycle_id})
+        return finish(STATUS_SKIPPED_NO_ENTRY)
 
     try:
         result = agent.run(ctx)

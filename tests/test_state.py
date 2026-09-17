@@ -3,12 +3,14 @@ precondition: if rendering is bounded, the token assertion in Phase 3 can hold."
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from tests.fakes import FakeBroker, position
 from trader.agent import StubAgent
 from trader.cycle import run_cycle
-from trader.db import connect, open_cycle, utcnow
+from trader.db import connect, open_cycle, record_decision, utcnow
 from trader.state import (
     MAX_RECENT_DECISIONS,
     MAX_RENDERED_POSITIONS,
@@ -26,6 +28,12 @@ def conn(tmp_path):
 def _ctx(conn, broker):
     cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
     return build_cycle_context(conn, broker, cycle_id=cycle_id)
+
+
+def test_clock_fallback_note_is_rendered(conn) -> None:
+    ctx = _ctx(conn, FakeBroker())
+    ctx = replace(ctx, clock=replace(ctx.clock, note="broker clock unavailable; RTH fallback"))
+    assert "clock_note: broker clock unavailable; RTH fallback" in render_state(ctx)
 
 
 def test_render_is_stable_across_many_cycles(tmp_path) -> None:
@@ -100,6 +108,28 @@ def test_kill_switch_state_is_visible_in_the_rendering(conn) -> None:
 
     set_flag(conn, KILL_SWITCH, "1")
     assert "kill_switch: ENGAGED" in render_state(_ctx(conn, FakeBroker()))
+
+
+def test_already_traded_today_is_rendered(conn) -> None:
+    cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
+    record_decision(
+        conn,
+        cycle_id=cycle_id,
+        action="buy",
+        symbol="NVDA",
+        qty=10,
+        broker_order_id="nvda-1",
+        outcome="accepted",
+    )
+    rendered = render_state(_ctx(conn, FakeBroker()))
+    assert "## Already traded today" in rendered
+    assert "NVDA — do not re-enter; risk layer will reject it" in rendered
+
+
+def test_an_unused_session_renders_an_empty_traded_today_list(conn) -> None:
+    rendered = render_state(_ctx(conn, FakeBroker()))
+    assert "## Already traded today" in rendered
+    assert "(none)" in rendered
 
 
 def test_resting_orders_are_visible_in_the_rendering(conn) -> None:

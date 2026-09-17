@@ -10,8 +10,14 @@
 # Unknown keys are still a hard error at load time.
 
 [limits]
-# 25% of equity in a single name. Was $5,000 (5%).
-max_position_notional = 25000.0
+# 100% of equity in a single name. Was $25,000 (25%), but that swamped the
+# playbook's risk-based sizing: with ORB stops at 0.15–0.3% of price, a $25k
+# cap cut dollar risk to $36–68 against the intended 0.75%-of-equity (~$750)
+# budget — the risk rule was dead code and a full 1.5R winner earned ~0.1% of
+# equity. At $100k the risk rule binds exactly when the stop is more than
+# 0.75% of price away; tighter stops are still notionally capped here, and
+# stop_loss_budget/max_daily_loss underwrite the downside either way.
+max_position_notional = 100000.0
 
 # 2x equity, i.e. half the available 4x day-trading buying power. Leaves
 # headroom so a gap against a levered position cannot trigger a margin call
@@ -28,15 +34,16 @@ max_daily_loss = 10000.0
 # See the token-cost note in the README before dropping cadence further.
 max_orders_per_hour = 20
 max_orders_per_day = 100
-# The agent may now place several orders in one cycle (scale in, hedge, exit).
-# Cadence is no longer a hard 1-order ceiling. This is the per-wake cap.
+# Per-wake cap. Flattening plus opening a different name can share a cycle;
+# adding to a name already on is pyramiding and is rejected.
 max_orders_per_cycle = 4
 
 [universe]
 # High-beta liquid names plus 3x leveraged ETFs. The leveraged tickers
-# (TQQQ/SQQQ/SOXL/SOXS) move ~3x the underlying, so a position at the
-# $25,000 cap carries roughly $75,000 of effective exposure — stacked on the
-# 2x portfolio cap that is real leverage, and it is intentional here.
+# (TQQQ/SQQQ/SOXL/SOXS) move ~3x the underlying; the playbook sizes them at
+# one-third notional, so ~$33k against the $100k cap ≈ $100k of effective
+# exposure — stacked on the 2x portfolio cap that is real leverage, and it
+# is intentional here.
 symbol_allowlist = [
     # mega-cap tech
     "AAPL",

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from trader.broker import BrokerError
+from trader.broker import BrokerError, weekday_rth_clock
 from trader.brokers import broker_endpoint, make_broker
 from trader.config import MissingCredential, Settings, load_settings
 from trader.constants import (
@@ -25,7 +25,6 @@ from trader.robinhood_mcp import (
     RobinhoodMcpBroker,
     bind_order_args,
     map_capabilities,
-    weekday_rth_clock,
 )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tests.fakes import FakeBroker, position
+from trader.broker import OrderFill
 from trader.db import connect, open_cycle, record_decision, utcnow
 from trader.execution import build_proposal, place_order, reconcile_fills
 from trader.risk.config import RiskConfig
@@ -80,8 +81,8 @@ def test_an_opening_buy_leaves_other_resting_orders_alone(conn) -> None:
     assert len(broker.get_open_orders("SPY")) == 1
 
 
-def test_an_adding_buy_keeps_the_positions_own_exits(conn) -> None:
-    """Adding to a long must not strip its protection; only reducing cancels."""
+def test_an_adding_buy_is_rejected_and_keeps_the_positions_own_exits(conn) -> None:
+    """Pyramiding is blocked; a rejected add must not strip the stop."""
     broker = FakeBroker(
         prices={"AAPL": 100.0},
         positions=[position("AAPL", 10, 100.0)],
@@ -89,8 +90,10 @@ def test_an_adding_buy_keeps_the_positions_own_exits(conn) -> None:
     )
     ctx = _ctx(conn, broker)
     proposal = build_proposal(broker, action="buy", symbol="AAPL", qty=5, reasoning="add")
-    place_order(conn, broker, ctx, proposal, CONFIG)
+    result = place_order(conn, broker, ctx, proposal, CONFIG)
 
+    assert not result.executed
+    assert "no_pyramid" in {f.check for f in result.verdict.failures}
     assert "cancel_open_orders" not in broker.calls
     assert len(broker.get_open_orders("AAPL")) == 1
 
@@ -167,3 +170,65 @@ def test_reconcile_survives_a_broker_read_failure(conn) -> None:
     assert results[0]["status"] == "error"
     row = conn.execute("SELECT final_status FROM decisions").fetchone()
     assert row["final_status"] is None  # left for a later run
+
+
+def test_reconcile_records_a_filled_bracket_take_profit(conn) -> None:
+    """A broker TP must become a sell decision so FIFO can close the lot."""
+    parent_fill = OrderFill(
+        order_id="parent-buy",
+        status="filled",
+        filled_qty=465,
+        filled_avg_price=214.75,
+        filled_at=utcnow(),
+        side="buy",
+        order_type="market",
+        legs=(
+            OrderFill(
+                order_id="tp-leg",
+                status="filled",
+                filled_qty=465,
+                filled_avg_price=216.30,
+                filled_at=utcnow(),
+                side="sell",
+                order_type="limit",
+            ),
+            OrderFill(
+                order_id="stop-leg",
+                status="canceled",
+                filled_qty=0,
+                filled_avg_price=None,
+                filled_at=None,
+                side="sell",
+                order_type="stop",
+            ),
+        ),
+    )
+    broker = FakeBroker(order_fills={"parent-buy": parent_fill})
+    cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
+    record_decision(
+        conn,
+        cycle_id=cycle_id,
+        action="buy",
+        symbol="NVDA",
+        qty=465,
+        broker_order_id="parent-buy",
+        outcome="accepted",
+    )
+    results = reconcile_fills(conn, broker)
+    kinds = {r.get("kind") for r in results}
+    assert "broker_exit" in kinds
+    exit_row = conn.execute(
+        "SELECT action, qty, filled_avg_price, outcome, final_status "
+        "FROM decisions WHERE broker_order_id = 'tp-leg'"
+    ).fetchone()
+    assert exit_row["action"] == "sell"
+    assert exit_row["qty"] == 465
+    assert exit_row["filled_avg_price"] == 216.30
+    assert exit_row["outcome"].startswith("broker_exit:")
+    assert exit_row["final_status"] == "filled"
+    # A second reconcile must not duplicate the exit.
+    again = reconcile_fills(conn, broker)
+    assert not any(r.get("kind") == "broker_exit" for r in again)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM decisions WHERE broker_order_id = 'tp-leg'"
+    ).fetchone()[0] == 1

@@ -65,12 +65,13 @@ def add_order(
     *,
     status: str | None = "filled",
     reference_price: float | None = None,
+    outcome: str = "accepted",
 ) -> None:
     conn.execute(
         "INSERT INTO decisions(cycle_id, timestamp, action, symbol, qty, risk_result, "
         "broker_order_id, outcome, reference_price, filled_qty, filled_avg_price, "
         "filled_at, final_status) "
-        "VALUES (?, ?, ?, ?, ?, 'approved', ?, 'accepted', ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?)",
         (
             cycle_id,
             f"{day}T{hour:02d}:00:00+00:00",
@@ -78,6 +79,7 @@ def add_order(
             symbol,
             qty,
             f"order-{symbol}-{day}-{hour}",
+            outcome,
             reference_price if reference_price is not None else price,
             qty if status == "filled" else None,
             price if status == "filled" else None,
@@ -289,6 +291,23 @@ def test_an_unreconciled_order_falls_back_to_the_reference_price(conn) -> None:
     assert report.orders_unreconciled == 1
     assert report.prices_estimated == 1  # the caveat is surfaced, not hidden
     assert report.round_trips[0].entry_price == 100.0
+
+
+def test_a_broker_take_profit_is_matched_as_a_round_trip(conn) -> None:
+    """Stop/TP fills are not agent orders; they must still close the lot."""
+    c = add_cycle(conn, "2026-09-01", 100_000)
+    add_order(conn, c, "2026-09-01", 10, "buy", "NVDA", 465, 214.75)
+    add_order(
+        conn, c, "2026-09-01", 12, "sell", "NVDA", 465, 216.30,
+        outcome="broker_exit:order-NVDA-2026-09-01-10",
+    )
+    report = evaluate(conn, "2026-09-01", "2026-09-01")
+    assert report.orders_submitted == 1  # the buy; the TP is not an agent order
+    assert report.orders_filled == 1
+    assert report.proposals == 1
+    assert len(report.round_trips) == 1
+    assert report.round_trips[0].realized_pl == pytest.approx(465 * (216.30 - 214.75))
+    assert report.open_at_end == {}
 
 
 # --- rejections and cycles -------------------------------------------------

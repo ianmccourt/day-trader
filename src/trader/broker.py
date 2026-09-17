@@ -8,7 +8,9 @@ new caller fails the build.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -29,7 +31,7 @@ from alpaca.trading.requests import (
     TakeProfitRequest,
 )
 
-from trader.constants import ALPACA_PAPER_BASE_URL, MARKET_TZ
+from trader.constants import ALPACA_PAPER_BASE_URL, MARKET_TZ, RTH_CLOSE, RTH_OPEN
 from trader.db import iso, utcnow
 
 #: Bar granularities the agent may request. Deliberately coarse — this is a
@@ -45,6 +47,39 @@ BAR_TIMEFRAMES = {
 #: Hard cap, because bars land in the prompt and the prompt has a token budget.
 MAX_BARS = 30
 
+#: Alpaca statuses that can still execute. `held` is the untriggered sibling
+#: of an OCO/bracket (the stop, while the take-profit is `new`). Querying
+#: `status=open` does not return those legs — they stay nested under the
+#: filled parent — which is how a live NVDA book showed only the target.
+_WORKING_ORDER_STATUSES = frozenset(
+    {
+        "new",
+        "accepted",
+        "pending_new",
+        "accepted_for_bidding",
+        "pending_cancel",
+        "pending_replace",
+        "pending_review",
+        "partially_filled",
+        "held",
+        "stopped",
+        "suspended",
+        "calculated",
+    }
+)
+
+#: How far back `get_open_orders` looks when flattening nested legs. Bracket
+#: parents are `filled` (so they drop out of `status=open`); a session is
+#: shorter than this, and exits are DAY orders anyway.
+_OPEN_ORDERS_LOOKBACK = timedelta(hours=20)
+
+log = logging.getLogger("trader.broker")
+
+#: Alpaca's /v2/clock has returned 500s that last multiple cycles. The SDK
+#: only retries 429s, so we retry here and then fall back to weekday RTH.
+CLOCK_ATTEMPTS = 2
+CLOCK_RETRY_PAUSE_S = 0.5
+
 
 class BrokerError(RuntimeError):
     """Any broker failure. Raised loudly so the cycle fails and gets logged."""
@@ -56,6 +91,74 @@ class Clock:
     is_open: bool
     next_open: datetime
     next_close: datetime
+    #: Set when this is a weekday-RTH fallback, not the broker's own clock.
+    #: Holidays and early closes are wrong in that case.
+    note: str | None = None
+
+
+def weekday_rth_clock(now: datetime | None = None) -> Clock:
+    """Weekday 09:30-16:00 America/New_York. Holidays and early closes are wrong."""
+    now = (now or datetime.now(MARKET_TZ)).astimezone(MARKET_TZ)
+    open_t = now.replace(hour=RTH_OPEN[0], minute=RTH_OPEN[1], second=0, microsecond=0)
+    close_t = now.replace(hour=RTH_CLOSE[0], minute=RTH_CLOSE[1], second=0, microsecond=0)
+    weekday = now.weekday() < 5
+    is_open = weekday and open_t <= now < close_t
+
+    def _next_open_after(day: datetime, *, skip_today: bool) -> datetime:
+        candidate = day.replace(hour=RTH_OPEN[0], minute=RTH_OPEN[1], second=0, microsecond=0)
+        if skip_today or candidate <= day or candidate.weekday() >= 5:
+            candidate = candidate + timedelta(days=1)
+            while candidate.weekday() >= 5:
+                candidate += timedelta(days=1)
+            candidate = candidate.replace(
+                hour=RTH_OPEN[0], minute=RTH_OPEN[1], second=0, microsecond=0
+            )
+        return candidate
+
+    if is_open:
+        next_open = _next_open_after(now, skip_today=True)
+        next_close = close_t
+    elif weekday and now < open_t:
+        next_open = open_t
+        next_close = close_t
+    else:
+        next_open = _next_open_after(now, skip_today=True)
+        next_close = next_open.replace(hour=RTH_CLOSE[0], minute=RTH_CLOSE[1])
+    return Clock(timestamp=now, is_open=is_open, next_open=next_open, next_close=next_close)
+
+
+def clock_with_fallback(
+    fetch: Callable[[], Clock],
+    *,
+    attempts: int = CLOCK_ATTEMPTS,
+    pause_s: float = CLOCK_RETRY_PAUSE_S,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> Clock:
+    """Retry a broker clock fetch, then weekday RTH. Never raises on fetch failure."""
+    last_exc: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return fetch()
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "get_clock_retry",
+                extra={"attempt": attempt + 1, "attempts": attempts, "error": str(exc)},
+            )
+            if attempt + 1 < attempts:
+                sleeper(pause_s)
+    log.warning("get_clock_fallback_rth", extra={"error": str(last_exc)})
+    fallback = weekday_rth_clock()
+    return Clock(
+        timestamp=fallback.timestamp,
+        is_open=fallback.is_open,
+        next_open=fallback.next_open,
+        next_close=fallback.next_close,
+        note=(
+            f"broker clock unavailable ({last_exc}); "
+            "using weekday RTH fallback (no holiday/early-close awareness)"
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +178,10 @@ class OrderFill:
     filled_qty: float
     filled_avg_price: float | None
     filled_at: datetime | None
+    side: str | None = None
+    order_type: str | None = None
+    #: Bracket/OCO children. Filled on the parent only; legs themselves are flat.
+    legs: tuple[OrderFill, ...] = ()
 
     @property
     def is_terminal(self) -> bool:
@@ -110,6 +217,73 @@ def _f(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value))
+
+
+def flatten_working_orders(raw: Sequence[Any]) -> list[dict[str, Any]]:
+    """Working orders plus nested bracket/OCO legs, de-duplicated by id.
+
+    Alpaca's `status=open` list returns the take-profit (`new`) as a top-level
+    order and omits the stop (`held`), which only appears as a leg on the
+    filled parent. Walking `legs` and keeping working statuses is what makes
+    `## Open orders` actually show the stop.
+    """
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+
+    def consider(order: Any) -> None:
+        status = _enum_value(getattr(order, "status", "")).lower()
+        if status not in _WORKING_ORDER_STATUSES:
+            return
+        order_id = str(order.id)
+        if order_id in seen:
+            return
+        seen.add(order_id)
+        out.append(
+            {
+                "order_id": order_id,
+                "symbol": order.symbol,
+                "side": _enum_value(order.side),
+                "type": _enum_value(getattr(order, "order_type", getattr(order, "type", ""))),
+                "qty": _f(order.qty),
+                "stop_price": _f(getattr(order, "stop_price", None)),
+                "limit_price": _f(getattr(order, "limit_price", None)),
+                "status": status,
+            }
+        )
+
+    for order in raw:
+        consider(order)
+        for leg in getattr(order, "legs", None) or []:
+            consider(leg)
+    return out
+
+
+def order_fill_from_alpaca(order: Any, *, include_legs: bool = True) -> OrderFill:
+    """Map an alpaca-py Order (and optional nested legs) to OrderFill."""
+    legs: tuple[OrderFill, ...] = ()
+    if include_legs:
+        legs = tuple(
+            order_fill_from_alpaca(leg, include_legs=False)
+            for leg in getattr(order, "legs", None) or []
+        )
+    side = _enum_value(getattr(order, "side", "")).lower()
+    order_type = _enum_value(
+        getattr(order, "order_type", getattr(order, "type", ""))
+    ).lower()
+    return OrderFill(
+        order_id=str(order.id),
+        status=_enum_value(order.status).lower(),
+        filled_qty=_f(order.filled_qty) or 0.0,
+        filled_avg_price=_f(order.filled_avg_price),
+        filled_at=order.filled_at,
+        side=side or None,
+        order_type=order_type or None,
+        legs=legs,
+    )
+
+
 class AlpacaBroker:
     """Thin wrapper over alpaca-py's TradingClient, pinned to the paper endpoint."""
 
@@ -132,16 +306,19 @@ class AlpacaBroker:
         return ALPACA_PAPER_BASE_URL
 
     def get_clock(self) -> Clock:
-        try:
-            raw = self._client.get_clock()
-        except Exception as exc:
-            raise BrokerError(f"get_clock failed: {exc}") from exc
-        return Clock(
-            timestamp=raw.timestamp,
-            is_open=bool(raw.is_open),
-            next_open=raw.next_open,
-            next_close=raw.next_close,
-        )
+        def _fetch() -> Clock:
+            try:
+                raw = self._client.get_clock()
+            except Exception as exc:
+                raise BrokerError(f"get_clock failed: {exc}") from exc
+            return Clock(
+                timestamp=raw.timestamp,
+                is_open=bool(raw.is_open),
+                next_open=raw.next_open,
+                next_close=raw.next_close,
+            )
+
+        return clock_with_fallback(_fetch)
 
     def get_account(self) -> dict[str, Any]:
         try:
@@ -342,29 +519,23 @@ class AlpacaBroker:
 
         Read-only. This is how the agent — and the flatten path — can see the
         stops and take-profits resting at the broker between cycles.
+
+        Must query `ALL` with `nested=True` and flatten legs: Alpaca keeps the
+        untriggered OCO sibling (`held` stop) on the filled parent, and
+        `status=open` returns only the working take-profit.
         """
         request = GetOrdersRequest(
-            status=QueryOrderStatus.OPEN,
+            status=QueryOrderStatus.ALL,
+            nested=True,
             symbols=[symbol.upper()] if symbol else None,
             limit=100,
+            after=datetime.now(UTC) - _OPEN_ORDERS_LOOKBACK,
         )
         try:
             raw = self._client.get_orders(filter=request)
         except Exception as exc:
             raise BrokerError(f"get_open_orders failed: {exc}") from exc
-        return [
-            {
-                "order_id": str(o.id),
-                "symbol": o.symbol,
-                "side": str(getattr(o.side, "value", o.side)),
-                "type": str(getattr(o.order_type, "value", o.order_type)),
-                "qty": _f(o.qty),
-                "stop_price": _f(o.stop_price),
-                "limit_price": _f(o.limit_price),
-                "status": str(getattr(o.status, "value", o.status)),
-            }
-            for o in raw
-        ]
+        return flatten_working_orders(raw)
 
     def cancel_open_orders(self, symbol: str) -> int:
         """Cancel every open order for one symbol. Returns how many.
@@ -439,15 +610,9 @@ class AlpacaBroker:
         )
 
     def get_order(self, order_id: str) -> OrderFill:
-        """Read one order back. Used by `trader reconcile`, never in a cycle."""
+        """Read one order back, including nested bracket legs when present."""
         try:
             order = self._client.get_order_by_id(order_id)
         except Exception as exc:
             raise BrokerError(f"get_order({order_id}) failed: {exc}") from exc
-        return OrderFill(
-            order_id=str(order.id),
-            status=str(getattr(order.status, "value", order.status)),
-            filled_qty=_f(order.filled_qty) or 0.0,
-            filled_avg_price=_f(order.filled_avg_price),
-            filled_at=order.filled_at,
-        )
+        return order_fill_from_alpaca(order)

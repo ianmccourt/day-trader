@@ -315,7 +315,9 @@ single legitimate one — plus the 5 remaining slots in the hourly rate budget.
 | Order while the market is closed | `regular_trading_hours_only` |
 | 30 orders in a minute | `max_orders_per_hour` |
 | Kill switch thrown mid-cycle | `kill_switch` |
-| Position built from legal slices | `max_position_notional` (caps the *result*) |
+| Position built from legal slices | `no_pyramid` |
+| Same-day re-entry after stop/TP/flatten | `no_same_day_reentry` |
+| Two full-size names at once | `one_name_budget` |
 
 ### How the layer cannot be bypassed
 
@@ -347,15 +349,18 @@ Three more properties worth knowing:
 | `symbol_allowlist` | Case-normalised, so casing is not a way around the list. |
 | `regular_trading_hours_only` | Reads the broker clock's verdict. `--force` does not override it. |
 | `no_unintended_short` | *Not in spec.MD.* "Sell 1000" against 10 held is a 990-share naked short that only `max_position_notional` would catch, and only by accident. Off by default; `[session].allow_shorts` enables it. |
-| `max_position_notional` | Caps the **resulting** position, not the order — otherwise an unbounded position can be built from individually legal slices. Sells that reduce an oversized position are still allowed, or we could never unwind one. |
+| `no_pyramid` | Rejects adding to a name already on. Flattening is allowed. |
+| `no_same_day_reentry` | After a stop, take-profit, or flatten the book is flat, so `no_pyramid` would not fire. One shot per symbol per session. Flattening a still-open lot is allowed. |
+| `one_name_budget` | A second name must fit inside `max_position_notional` together with what is already held. Two full-cap names (a 2× stack) are rejected; two smaller names that still fit are allowed. |
+| `max_position_notional` | Caps the **resulting** position, not the order. Sells that reduce an oversized position are still allowed, or we could never unwind one. |
 | `max_total_exposure` | Recomputes the traded symbol at the reference price rather than reusing its snapshot, so a stale `market_value` cannot understate the result. |
 | `max_daily_loss` | **Latches.** The first breach writes a `daily_loss_halt:<day>` flag; an intraday recovery does not re-enable trading. Fails closed if the prior close is unknown. |
 | `max_orders_per_hour` / `max_orders_per_day` / `max_orders_per_cycle` | Counted from our own `decisions` rows — the broker has no idea which of its orders came from this harness. An approved order the broker then rejects gets no order id, so it does not consume budget. `max_orders_per_cycle` is the per-wake cap; the tool layer also refuses extra *attempts*. |
 | `protective_exits` | Stop/take-profit must sit on the correct side of the entry. Missing exits are allowed. |
 | `stop_loss_budget` | A stop whose dollar risk exceeds the remaining daily-loss budget is rejected. |
 
-`uv run pytest` — 46 per-check units (a passing, failing and boundary case
-each), and 22 adversarial cases run through the real execution path against a
+`uv run pytest` — 66 per-check units (a passing, failing and boundary case
+each), and 28 adversarial cases run through the real execution path against a
 real SQLite file.
 
 
@@ -450,7 +455,7 @@ every cycle starts with an orphan sweep: open theses with no matching position
 
 ### The context budget
 
-`MAX_PROMPT_TOKENS = 12_000`, asserted before **every** request in the loop, not
+`MAX_PROMPT_TOKENS = 16_000`, asserted before **every** request in the loop, not
 just the first — tool results accumulate, so the last iteration is the one that
 would blow it. Counted through the API's own `count_tokens` with the real
 system, messages, and tools; a local estimate that drifts from the server's
@@ -463,6 +468,17 @@ tokens of dense table), and the scan exists to *reduce* tool round-trips, not
 to squeeze the state. `MAX_STATE_CHARS` grew 5,000 → 7,000 for the same
 reason, and the worst-case bounding test now renders both new sections at
 their caps.
+
+It grew again, 12,000 → 16,000, after 2026-09-11: five consecutive cycles
+aborted at 10.0–10.9k tokens during 09:50–10:15 ET — the first half hour of
+the primary entry window — and the day's one trade-placing cycle peaked at
+10,972. The playbook's mandated workflow (open-risk check, quote, bars, then
+`place_order`) spans 2–3 tool iterations, and each iteration echoes its
+adaptive-thinking blocks back per the API contract, so a compliant cycle
+simply does not fit in 12k with headroom. The loop is bounded by
+`MAX_TOOL_ITERATIONS` and the tool-result character caps; the budget is a
+tripwire for state-rendering regressions, and a tripwire that fires on the
+mandated workflow aborts exactly the cycles that were about to trade.
 
 Measured, not estimated (pre-scan numbers; add ~1,100 tokens for a full scan):
 

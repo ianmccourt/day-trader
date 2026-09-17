@@ -14,6 +14,7 @@ from trader.cycle import (
     STATUS_HALTED_KILL_SWITCH,
     STATUS_OK,
     STATUS_SKIPPED_CLOSED,
+    STATUS_SKIPPED_NO_ENTRY,
     run_cycle,
 )
 from trader.db import KILL_SWITCH, connect, cycles_on, reconcile_orphan_cycles, set_flag, utcnow
@@ -84,6 +85,76 @@ def test_force_runs_the_agent_outside_rth(conn, broker) -> None:
     broker.is_open = False
     outcome = run_cycle(conn, broker, StubAgent(), force=True)
     assert outcome.status == STATUS_OK
+
+
+# --- the no-entry-window gate ------------------------------------------------
+# After 14:30 ET the playbook forbids new entries, so a flat book with no
+# resting orders can only ever answer no_action. The cycle runner skips the
+# LLM call instead of paying for that answer.
+
+
+class ExplodingIfCalled:
+    """Fails the test if the agent is invoked at all."""
+
+    def run(self, ctx):
+        raise AssertionError("the agent should not have been invoked")
+
+
+def test_flat_book_after_entry_windows_skips_the_llm(conn) -> None:
+    broker = FakeBroker(clock_local_time=(14, 45))  # flat, nothing resting
+    outcome = run_cycle(conn, broker, ExplodingIfCalled())
+    assert outcome.status == STATUS_SKIPPED_NO_ENTRY
+    # Snapshots still land, same as the market-closed skip.
+    assert conn.execute("SELECT COUNT(*) FROM account_snapshot").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+
+
+def test_gate_opens_exactly_at_its_boundary(conn) -> None:
+    assert (
+        run_cycle(conn, FakeBroker(clock_local_time=(14, 30)), ExplodingIfCalled()).status
+        == STATUS_SKIPPED_NO_ENTRY
+    )
+
+
+def test_before_the_boundary_the_agent_still_runs(conn) -> None:
+    assert (
+        run_cycle(conn, FakeBroker(clock_local_time=(14, 29)), StubAgent()).status == STATUS_OK
+    )
+
+
+def test_a_held_position_after_entry_windows_still_runs_the_agent(conn) -> None:
+    broker = FakeBroker(
+        positions=[position("AAPL", 10, 200.0, 205.0)], clock_local_time=(15, 0)
+    )
+    assert run_cycle(conn, broker, StubAgent()).status == STATUS_OK
+
+
+def test_a_resting_order_after_entry_windows_still_runs_the_agent(conn) -> None:
+    broker = FakeBroker(
+        clock_local_time=(15, 0),
+        open_orders=[
+            {
+                "symbol": "AAPL",
+                "side": "sell",
+                "qty": 10,
+                "type": "stop",
+                "stop_price": 195.0,
+                "status": "open",
+            }
+        ],
+    )
+    assert run_cycle(conn, broker, StubAgent()).status == STATUS_OK
+
+
+def test_a_failed_open_orders_read_is_not_evidence_of_flatness(conn) -> None:
+    """If the read errored, the book might not be flat — run the agent."""
+    broker = FakeBroker(clock_local_time=(15, 0), fail_on={"get_open_orders"})
+    assert run_cycle(conn, broker, StubAgent()).status == STATUS_OK
+
+
+def test_force_bypasses_the_no_entry_gate(conn) -> None:
+    broker = FakeBroker(clock_local_time=(15, 0))
+    assert run_cycle(conn, broker, StubAgent(), force=True).status == STATUS_OK
 
 
 def test_kill_switch_halts_before_any_broker_call(conn, broker) -> None:
@@ -196,6 +267,7 @@ RISK = RiskConfig(
 
 
 def test_an_approved_proposal_reaches_the_broker(conn, broker) -> None:
+    broker.positions = []
     broker.prices["AAPL"] = 100.0
     outcome = run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", 10), risk_config=RISK)
     assert outcome.status == STATUS_OK
@@ -250,6 +322,7 @@ def test_a_proposal_with_no_qty_is_rejected_not_crashed(conn, broker) -> None:
 
 def test_fills_are_reconciled_automatically_at_cycle_start(conn, broker) -> None:
     """`trader reconcile` still exists, but forgetting it no longer loses data."""
+    broker.positions = []
     broker.prices["AAPL"] = 100.0
     run_cycle(conn, broker, ScriptedAgent("buy", "AAPL", 10), risk_config=RISK)
     assert conn.execute(

@@ -264,6 +264,68 @@ def no_unintended_short(proposal: Proposal, state: RiskState) -> CheckResult:
     return OK
 
 
+def _increases_existing_position(proposal: Proposal, state: RiskState) -> bool:
+    current = state.position(proposal.symbol).qty
+    if current == 0:
+        return False
+    resulting = current + proposal.signed_qty
+    return abs(resulting) > abs(current) + 1e-9
+
+
+def no_pyramid(proposal: Proposal, state: RiskState) -> CheckResult:
+    """Reject adding to a name that is already on. Flattening is allowed.
+
+    The playbook's "do not add to a name you already hold" was being ignored:
+    NVDA 465, then 400 more after the first lot was taken off is the same
+    pattern while a lot is still open. One position per symbol, no scale-in.
+    """
+    if not _increases_existing_position(proposal, state):
+        return OK
+    current = state.position(proposal.symbol)
+    return False, (
+        f"{proposal.symbol}: already holding {current.qty:g} sh; "
+        "adding is pyramiding. Flatten or sit out — one position per symbol"
+    )
+
+
+def no_same_day_reentry(proposal: Proposal, state: RiskState) -> CheckResult:
+    """Reject opening a name that already traded today (stop, target, or flatten).
+
+    After a take-profit the book is flat, so no_pyramid does not fire, and the
+    model immediately bought SQQQ / NVDA / QQQ again. One shot per symbol per
+    session. Flattening a still-open lot is not an opening and is allowed.
+    """
+    if state.position(proposal.symbol).qty != 0:
+        return OK
+    symbol = proposal.symbol.upper()
+    if symbol not in state.symbols_traded_today:
+        return OK
+    return False, (
+        f"{symbol} already traded today; do not re-enter after a stop, "
+        "take-profit, or flatten. Sit out or pick a name that is still unused"
+    )
+
+
+def one_name_budget(proposal: Proposal, state: RiskState) -> CheckResult:
+    """A second name must fit inside max_position_notional with what is held.
+
+    Two full-cap names is a 2×-equity stack (NVDA+QQQ, NVDA+AVGO). Several
+    smaller names (two 1/3-size 3x ETFs) still fit. Flattening the current
+    symbol is not an opening and skips this check.
+    """
+    if state.position(proposal.symbol).qty != 0:
+        return OK
+    limit = state.config.max_position_notional
+    resulting = state.total_exposure + proposal.notional
+    if resulting <= limit:
+        return OK
+    return False, (
+        f"opening {proposal.symbol} at {_money(proposal.notional)} on top of "
+        f"existing exposure {_money(state.total_exposure)} = {_money(resulting)} "
+        f"exceeds one-name budget {_money(limit)}; flatten or size down first"
+    )
+
+
 #: Evaluation order. The engine runs all of them regardless of earlier failures,
 #: so a rejection tells the model everything that is wrong, not just the first
 #: thing. Order matters only for how the reasons are presented.
@@ -273,6 +335,9 @@ CHECKS: tuple[Check, ...] = (
     symbol_allowlist,
     regular_trading_hours_only,
     no_unintended_short,
+    no_pyramid,
+    no_same_day_reentry,
+    one_name_budget,
     max_position_notional,
     max_total_exposure,
     max_daily_loss,

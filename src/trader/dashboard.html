@@ -110,6 +110,7 @@
     <section class="card">
       <h2>Positions</h2>
       <div id="positions" class="muted">No snapshot yet.</div>
+      <div id="last-decision" style="margin-top:14px"></div>
     </section>
     <section class="grid">
       <div class="card">
@@ -216,23 +217,44 @@
         ["Trading day", s.trading_day, nxt && s.loop.running
           ? `waiting until ${fmtWhen(nxt)} · ${brokerLabel}`
           : `${s.cycle_minutes} min · ${brokerLabel}`],
-        ["Equity", money(acct.equity), acct.captured_at ? `as of ${acct.captured_at}` : "no snapshot"],
+        ["Equity", money(acct.equity), acct.captured_at ? `as of ${fmtWhen(acct.captured_at)}` : "no snapshot"],
         ["Cycles today", s.cycles_today, Object.entries(s.cycles_by_status).map(([k,v]) => `${v} ${k}`).join(" · ") || "none"],
         ["Decisions today", orders, `${s.decisions_today.no_action || 0} no-action`],
         ["Unreconciled", s.unreconciled_orders, "submitted, fill unknown"],
         ["Last cycle", last ? `#${last.cycle_id}` : "—", last ? `${last.status} · ${last.duration_ms || "—"}ms` : ""],
       ].map(([k,v,sub]) => `<div class="card"><div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
 
+      const asOf = s.positions_as_of_cycle_id
+        ? `as of cycle ${s.positions_as_of_cycle_id}`
+          + (s.positions_captured_at ? ` · ${fmtWhen(s.positions_captured_at)}` : "")
+        : "no snapshot yet";
       if (!s.positions.length) {
-        $("positions").innerHTML = `<span class="muted">No open positions in the last snapshot.</span>`;
+        $("positions").innerHTML = `<div class="s">${esc(asOf)}</div>`
+          + `<span class="muted">Flat — no holdings in the latest account snapshot.</span>`;
       } else {
-        $("positions").innerHTML = `<table><tr><th>Symbol</th><th>Qty</th><th>Last</th><th>Value</th><th>uP/L</th></tr>${
+        $("positions").innerHTML = `<div class="s">${esc(asOf)}</div><table><tr><th>Symbol</th><th>Qty</th><th>Last</th><th>Value</th><th>uP/L</th></tr>${
           s.positions.map(p => `<tr><td>${esc(p.symbol)}</td><td>${esc(p.qty)}</td><td>${money(p.current_price)}</td><td>${money(p.market_value)}</td><td class="${p.unrealized_pl>=0?"ok":"err"}">${money(p.unrealized_pl)}</td></tr>`).join("")
         }</table>`;
       }
 
-      $("cycles").innerHTML = `<table><tr><th>ID</th><th>When</th><th>Status</th><th>ms</th></tr>${
-        s.cycles.map(c => `<tr class="clickable" data-id="${c.cycle_id}"><td>${c.cycle_id}</td><td class="muted">${esc(c.started_at)}</td><td class="${statusClass(c.status)}">${esc(c.status)}</td><td>${c.duration_ms ?? "—"}</td></tr>`).join("") || "<tr><td class=muted colspan=4>No cycles yet.</td></tr>"
+      const ld = s.last_decision;
+      if (ld) {
+        const why = (ld.reasoning || "").trim();
+        const fill = [ld.action, ld.symbol, ld.qty != null ? ld.qty : "", ld.outcome]
+          .filter((x) => x !== "" && x != null).join(" · ");
+        $("last-decision").innerHTML = `<h2>Last decision</h2>`
+          + `<div class="s">cycle ${esc(ld.cycle_id)} · ${esc(fmtWhen(ld.timestamp))} · ${esc(fill)}</div>`
+          + `<div style="margin-top:8px;white-space:pre-wrap">${esc(why || "—")}</div>`;
+      } else {
+        $("last-decision").innerHTML = "";
+      }
+
+      $("cycles").innerHTML = `<table><tr><th>ID</th><th>When</th><th>Status</th><th>ms</th><th>Error</th></tr>${
+        s.cycles.map(c => {
+          const err = String(c.error || "").split("\n")[0];
+          const short = err.length > 90 ? err.slice(0, 87) + "…" : err;
+          return `<tr class="clickable" data-id="${c.cycle_id}"><td>${c.cycle_id}</td><td class="muted">${esc(fmtWhen(c.started_at))}</td><td class="${statusClass(c.status)}">${esc(c.status)}</td><td>${c.duration_ms ?? "—"}</td><td class="err">${esc(short)}</td></tr>`;
+        }).join("") || "<tr><td class=muted colspan=5>No cycles yet.</td></tr>"
       }</table>`;
       $("cycles").querySelectorAll("tr.clickable").forEach((tr) => {
         tr.addEventListener("click", () => showCycle(tr.dataset.id));

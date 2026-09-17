@@ -55,8 +55,11 @@ MAX_TOTAL_TOOL_RESULT_CHARS = 4_000
 class ContextBudgetExceeded(RuntimeError):
     """The assembled prompt would exceed MAX_PROMPT_TOKENS.
 
-    Raised, never worked around. If this fires, the fix is to render less state
-    or cap a tool result — not to raise the ceiling.
+    Raised, never worked around. If this fires, first check for something
+    rendering more state than it should or an uncapped tool result. The ceiling
+    itself moves only with measured evidence (see the constant's comment): it
+    must at minimum fit the playbook's mandated read-then-order workflow, or
+    the budget aborts exactly the cycles that were about to trade.
     """
 
 

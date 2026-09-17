@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.fakes import FakeBroker
+from tests.fakes import FakeBroker, position
 from trader.db import KILL_SWITCH, connect, open_cycle, set_flag, utcnow
 from trader.execution import build_proposal, daily_halt_flag, place_order
 from trader.risk.config import RiskConfig
@@ -112,9 +112,12 @@ def test_after_hours_orders_are_rejected(conn, broker) -> None:
 
 def test_rapid_fire_stops_at_the_hourly_limit(conn, broker) -> None:
     """Twenty attempts in a row must yield exactly max_orders_per_hour fills."""
-    for _ in range(20):
+    symbols = [f"X{chr(ord('A') + i)}" for i in range(20)]
+    cfg = replace(CONFIG, symbol_allowlist=frozenset(symbols))
+    broker.prices.update({s: 100.0 for s in symbols})
+    for sym in symbols:
         ctx = ctx_for(conn, broker)
-        place_order(conn, broker, ctx, p("buy", "AAPL", 1), CONFIG)
+        place_order(conn, broker, ctx, p("buy", sym, 1), cfg)
 
     assert len(broker.submitted) == CONFIG.max_orders_per_hour
     rejected = conn.execute(
@@ -124,15 +127,22 @@ def test_rapid_fire_stops_at_the_hourly_limit(conn, broker) -> None:
 
 
 def test_daily_order_cap_binds_when_the_hourly_cap_does_not(conn, broker) -> None:
-    generous = replace(CONFIG, max_orders_per_hour=1_000, max_orders_per_day=3)
-    for _ in range(10):
+    symbols = ["AAPL", "MSFT", "SPY", "QQQ", "IWM"]
+    generous = replace(
+        CONFIG,
+        max_orders_per_hour=1_000,
+        max_orders_per_day=3,
+        symbol_allowlist=frozenset(symbols),
+    )
+    broker.prices.update({s: 100.0 for s in symbols})
+    for sym in symbols:
         ctx = ctx_for(conn, broker)
-        place_order(conn, broker, ctx, p("buy", "AAPL", 1), generous)
+        place_order(conn, broker, ctx, p("buy", sym, 1), generous)
     assert len(broker.submitted) == 3
 
 
-def test_salami_slicing_cannot_exceed_the_position_cap(conn, broker) -> None:
-    """Individually legal orders must not add up to an oversized position."""
+def test_salami_slicing_is_blocked_as_pyramiding(conn, broker) -> None:
+    """Same-symbol adds used to walk the notional cap; they are now rejected."""
     generous = replace(CONFIG, max_orders_per_hour=1_000, max_orders_per_day=1_000)
     filled = 0
     for _ in range(20):
@@ -140,8 +150,44 @@ def test_salami_slicing_cannot_exceed_the_position_cap(conn, broker) -> None:
         result = place_order(conn, broker, ctx, p("buy", "AAPL", 10), generous)
         if result.executed:
             filled += 10
-    assert filled == 50  # $5,000 at $100, exactly max_position_notional
-    assert len(broker.submitted) == 5
+    assert filled == 10  # first clip only; the rest are no_pyramid
+    assert len(broker.submitted) == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM risk_events WHERE check_name = 'no_pyramid'"
+    ).fetchone()[0] == 19
+
+
+def test_adding_to_an_open_lot_is_rejected(conn, broker) -> None:
+    broker.positions = [position("AAPL", 10, 100.0)]
+    ctx = ctx_for(conn, broker)
+    result = place_order(conn, broker, ctx, p("buy", "AAPL", 10), CONFIG)
+    assert not result.executed
+    assert "no_pyramid" in {f.check for f in result.verdict.failures}
+    assert broker.submitted == []
+
+
+def test_same_day_reentry_after_flatten_is_rejected(conn, broker) -> None:
+    ctx = ctx_for(conn, broker)
+    opened = place_order(conn, broker, ctx, p("buy", "AAPL", 10), CONFIG)
+    assert opened.executed
+    ctx = ctx_for(conn, broker)
+    flattened = place_order(conn, broker, ctx, p("sell", "AAPL", 10), CONFIG)
+    assert flattened.executed
+    ctx = ctx_for(conn, broker)
+    again = place_order(conn, broker, ctx, p("buy", "AAPL", 10), CONFIG)
+    assert not again.executed
+    assert "no_same_day_reentry" in {f.check for f in again.verdict.failures}
+
+
+def test_a_second_full_size_name_is_rejected(conn, broker) -> None:
+    ctx = ctx_for(conn, broker)
+    first = place_order(conn, broker, ctx, p("buy", "AAPL", 50), CONFIG)
+    assert first.executed
+    ctx = ctx_for(conn, broker)
+    second = place_order(conn, broker, ctx, p("buy", "MSFT", 50), CONFIG)
+    assert not second.executed
+    assert "one_name_budget" in {f.check for f in second.verdict.failures}
+    assert len(broker.submitted) == 1
 
 
 def test_salami_inside_one_cycle_is_still_capped(conn, broker) -> None:
@@ -158,8 +204,8 @@ def test_salami_inside_one_cycle_is_still_capped(conn, broker) -> None:
         result = place_order(conn, broker, ctx, p("buy", "AAPL", 10), generous)
         if result.executed:
             filled += 10
-    assert filled == 50
-    assert len(broker.submitted) == 5
+    assert filled == 10
+    assert len(broker.submitted) == 1
 
 
 def test_an_approved_order_can_carry_a_broker_stop(conn, broker) -> None:

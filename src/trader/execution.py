@@ -12,7 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-from trader.broker import Broker, BrokerError, OrderReceipt
+from trader.broker import Broker, BrokerError, OrderFill, OrderReceipt
 from trader.db import (
     get_flag,
     kill_switch_engaged,
@@ -28,6 +28,10 @@ from trader.risk.models import Proposal, RiskState
 from trader.state import CycleContext, refresh_cycle_context
 
 log = logging.getLogger("trader.execution")
+
+#: outcome prefix for stop/take-profit fills discovered on a bracket parent.
+#: Rate counters ignore these so a broker exit does not consume max_orders_*.
+BROKER_EXIT_PREFIX = "broker_exit:"
 
 
 def daily_halt_flag(trading_day: str) -> str:
@@ -112,7 +116,8 @@ def reconcile_fills(
     Returns one entry per pending order: status "reconciled" for a recorded
     terminal fill, "open" for an order still working (left NULL for a later
     run), "error" if the broker read failed. Called automatically at the top
-    of every cycle and by `trader reconcile`.
+    of every cycle and by `trader reconcile`. After parent fills, also records
+    filled bracket legs (stops/take-profits) so Phase 4 FIFO sees the exit.
     """
     results: list[dict[str, Any]] = []
     for row in unreconciled_orders(conn, limit=limit):
@@ -147,7 +152,121 @@ def reconcile_fills(
                 "filled_avg_price": fill.filled_avg_price,
             }
         )
+    results.extend(record_bracket_exits(conn, broker, limit=limit))
     return results
+
+
+def record_bracket_exits(
+    conn: sqlite3.Connection, broker: Broker, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Persist filled stop/take-profit legs that never went through place_order.
+
+    The parent buy is already a decision. When Alpaca fills the take-profit
+    (or the stop), that child has no row, so evaluate's FIFO invents leftover
+    inventory. One decision per filled child, outcome `broker_exit:<parent>`.
+    """
+    recorded_parents = {
+        str(row["outcome"]).removeprefix(BROKER_EXIT_PREFIX)
+        for row in conn.execute(
+            "SELECT outcome FROM decisions WHERE outcome LIKE ?",
+            (f"{BROKER_EXIT_PREFIX}%",),
+        ).fetchall()
+        if row["outcome"]
+    }
+    known_ids = {
+        str(row["broker_order_id"])
+        for row in conn.execute(
+            "SELECT broker_order_id FROM decisions WHERE broker_order_id IS NOT NULL"
+        ).fetchall()
+    }
+    parents = conn.execute(
+        """
+        SELECT id, cycle_id, action, symbol, broker_order_id FROM decisions
+        WHERE broker_order_id IS NOT NULL
+          AND final_status = 'filled'
+          AND action IN ('buy', 'sell')
+          AND IFNULL(outcome, '') NOT LIKE ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (f"{BROKER_EXIT_PREFIX}%", limit),
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    for parent in parents:
+        parent_id = str(parent["broker_order_id"])
+        if parent_id in recorded_parents:
+            continue
+        try:
+            fill = broker.get_order(parent_id)
+        except BrokerError as exc:
+            log.warning(
+                "bracket_exit_read_failed",
+                extra={"order_id": parent_id},
+                exc_info=True,
+            )
+            results.append(
+                {"symbol": parent["symbol"], "order_id": parent_id, "status": "error", "error": str(exc)}
+            )
+            continue
+        filled_legs = [
+            leg for leg in fill.legs if leg.status == "filled" and (leg.filled_qty or 0) > 0
+        ]
+        if not filled_legs:
+            continue
+        for leg in filled_legs:
+            if leg.order_id in known_ids:
+                continue
+            exit_action = _exit_action(parent["action"], leg)
+            decision_id = record_decision(
+                conn,
+                cycle_id=int(parent["cycle_id"]),
+                action=exit_action,
+                symbol=parent["symbol"],
+                qty=leg.filled_qty,
+                reasoning=(
+                    f"broker {leg.order_type or 'exit'} filled for parent {parent_id}"
+                ),
+                risk_result="approved",
+                broker_order_id=leg.order_id,
+                outcome=f"{BROKER_EXIT_PREFIX}{parent_id}",
+                reference_price=leg.filled_avg_price,
+            )
+            record_fill(
+                conn,
+                decision_id,
+                final_status=leg.status,
+                filled_qty=leg.filled_qty,
+                filled_avg_price=leg.filled_avg_price,
+                filled_at=leg.filled_at.isoformat() if leg.filled_at else None,
+            )
+            known_ids.add(leg.order_id)
+            recorded_parents.add(parent_id)
+            results.append(
+                {
+                    "symbol": parent["symbol"],
+                    "order_id": leg.order_id,
+                    "status": "reconciled",
+                    "final_status": leg.status,
+                    "filled_qty": leg.filled_qty,
+                    "filled_avg_price": leg.filled_avg_price,
+                    "kind": "broker_exit",
+                }
+            )
+            log.info(
+                "recorded_broker_exit",
+                extra={
+                    "symbol": parent["symbol"],
+                    "parent_order_id": parent_id,
+                    "leg_order_id": leg.order_id,
+                    "qty": leg.filled_qty,
+                },
+            )
+    return results
+
+
+def _exit_action(parent_action: str, leg: OrderFill) -> str:
+    if leg.side in ("buy", "sell"):
+        return leg.side
+    return "sell" if parent_action == "buy" else "buy"
 
 
 def place_order(

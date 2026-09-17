@@ -18,6 +18,7 @@ from trader.cycle import run_cycle
 from trader.db import (
     KILL_SWITCH,
     connect,
+    current_positions,
     cycles_on,
     kill_switch_engaged,
     last_cycle,
@@ -121,10 +122,7 @@ def cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         "JOIN cycles c USING (cycle_id) WHERE c.trading_day = ? GROUP BY action",
         (day,),
     ).fetchall()
-    positions = conn.execute(
-        "SELECT symbol, qty, market_value, unrealized_pl FROM positions_snapshot "
-        "WHERE cycle_id = (SELECT MAX(cycle_id) FROM positions_snapshot)"
-    ).fetchall()
+    pos_cycle_id, pos_captured_at, positions = current_positions(conn)
     out: dict[str, Any] = {
         "db": str(settings.db_path),
         "broker": settings.broker,
@@ -137,7 +135,12 @@ def cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         "last_cycle": dict(last) | {"full_prompt": "<omitted>", "full_response": "<omitted>"}
         if last
         else None,
-        "last_known_positions": [dict(p) for p in positions],
+        "last_known_positions": [
+            {k: p[k] for k in ("symbol", "qty", "market_value", "unrealized_pl")}
+            for p in positions
+        ],
+        "positions_as_of_cycle_id": pos_cycle_id,
+        "positions_captured_at": pos_captured_at,
     }
     print(json.dumps(out, indent=2, default=str))
     return 0

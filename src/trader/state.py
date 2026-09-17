@@ -16,7 +16,7 @@ from typing import Any
 
 from trader.broker import Broker, BrokerError, Clock
 from trader.constants import MARKET_TZ
-from trader.db import kill_switch_engaged, orders_for_cycle, orders_since, utcnow
+from trader.db import kill_switch_engaged, orders_for_cycle, orders_since, symbols_traded_since, utcnow
 from trader.scanner import ScanRow, render_scan, scan_universe
 
 #: Hard caps on anything variable-length that reaches the prompt. These are the
@@ -84,6 +84,8 @@ class CycleContext:
     #: knows whether a position is actually protected.
     open_orders: list[dict[str, Any]] = field(default_factory=list)
     open_orders_note: str | None = None
+    #: Tickers that already had a submitted order or a broker stop/TP fill today.
+    symbols_traded_today: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def total_exposure(self) -> float:
@@ -187,6 +189,7 @@ def build_cycle_context(
         scan_note=scan_note,
         open_orders=open_orders,
         open_orders_note=open_orders_note,
+        symbols_traded_today=symbols_traded_since(conn, _start_of_trading_day(now)),
     )
 
 
@@ -232,6 +235,7 @@ def refresh_cycle_context(
         ),
         open_orders=open_orders,
         open_orders_note=open_orders_note,
+        symbols_traded_today=symbols_traded_since(conn, _start_of_trading_day(ctx.now)),
     )
 
 
@@ -266,6 +270,11 @@ def render_state(ctx: CycleContext) -> str:
         f"time: {local:%Y-%m-%d %H:%M:%S %Z} (trading day {ctx.trading_day})",
         f"market_open: {ctx.clock.is_open}",
         f"next_close: {ctx.clock.next_close.astimezone(MARKET_TZ):%Y-%m-%d %H:%M %Z}",
+        *(
+            [f"clock_note: {ctx.clock.note}"]
+            if getattr(ctx.clock, "note", None)
+            else []
+        ),
         f"kill_switch: {'ENGAGED' if ctx.kill_switch else 'off'}",
         "",
         "## Account",
@@ -304,6 +313,13 @@ def render_state(ctx: CycleContext) -> str:
             lines.append(
                 f"({len(ctx.open_orders) - MAX_RENDERED_OPEN_ORDERS} more not rendered)"
             )
+
+    traded = sorted(ctx.symbols_traded_today)
+    lines += ["", "## Already traded today"]
+    if not traded:
+        lines.append("(none) — a name listed here cannot be opened again this session")
+    else:
+        lines.append(", ".join(traded) + " — do not re-enter; risk layer will reject it")
 
     lines += ["", "## Market scan (precomputed; opening range 09:30-09:45 ET)"]
     if ctx.scan is None:

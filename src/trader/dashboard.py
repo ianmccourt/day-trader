@@ -16,6 +16,7 @@ import sys
 import time
 import webbrowser
 from contextlib import suppress
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -23,10 +24,11 @@ from urllib.parse import urlparse
 
 from trader.brokers import broker_endpoint, make_broker
 from trader.config import MissingCredential, Settings
-from trader.constants import BROKER_PAPER
+from trader.constants import BROKER_PAPER, MARKET_TZ
 from trader.db import (
     KILL_SWITCH,
     connect,
+    current_positions,
     cycles_on,
     kill_switch_engaged,
     last_cycle,
@@ -36,6 +38,7 @@ from trader.db import (
 )
 from trader.risk.checks import CHECK_NAMES
 from trader.risk.config import RiskConfig, RiskConfigError, load_risk_config
+from trader.scheduler import rth_trigger
 from trader.state import trading_day_for
 
 PAGE = Path(__file__).with_name("dashboard.html")
@@ -174,7 +177,11 @@ def tail_log(path: Path, n: int = 60) -> list[dict[str, Any]]:
 
 
 def next_scheduled_cycle(rows: list[dict[str, Any]]) -> str | None:
-    """Newest `scheduler_start.next_cycle`, or None after a stop."""
+    """Newest `scheduler_start.next_cycle`, or None after a stop.
+
+    Only the first fire after process start is in that log line, so the
+    snapshot prefers `upcoming_cycle_iso` (wall-clock) over this.
+    """
     for row in reversed(rows):
         msg = row.get("msg")
         if msg == "scheduler_stopped":
@@ -183,6 +190,15 @@ def next_scheduled_cycle(rows: list[dict[str, Any]]) -> str | None:
             nxt = row.get("next_cycle")
             return str(nxt) if nxt else None
     return None
+
+
+def upcoming_cycle_iso(cycle_minutes: int, *, running: bool, now: datetime | None = None) -> str | None:
+    """Next RTH grid fire from *now*, not from the process-start log line."""
+    if not running:
+        return None
+    current = (now or utcnow()).astimezone(MARKET_TZ)
+    nxt = rth_trigger(cycle_minutes).get_next_fire_time(None, current)
+    return nxt.isoformat() if nxt else None
 
 
 def session_snapshot(
@@ -206,14 +222,14 @@ def session_snapshot(
         "JOIN cycles c USING (cycle_id) WHERE c.trading_day = ? GROUP BY action",
         (day,),
     ).fetchall()
-    positions = conn.execute(
-        "SELECT symbol, qty, avg_price, current_price, market_value, unrealized_pl "
-        "FROM positions_snapshot "
-        "WHERE cycle_id = (SELECT MAX(cycle_id) FROM positions_snapshot)"
-    ).fetchall()
+    pos_cycle_id, pos_captured_at, positions = current_positions(conn)
     account = conn.execute(
         "SELECT equity, last_equity, cash, buying_power, captured_at "
         "FROM account_snapshot ORDER BY cycle_id DESC LIMIT 1"
+    ).fetchone()
+    last_decision = conn.execute(
+        "SELECT cycle_id, timestamp, action, symbol, qty, reasoning, "
+        "risk_result, outcome FROM decisions ORDER BY id DESC LIMIT 1"
     ).fetchone()
     recent_cycles = conn.execute(
         "SELECT cycle_id, started_at, trading_day, status, duration_ms, "
@@ -285,7 +301,7 @@ def session_snapshot(
             "running": running,
             "pid": loop.pid() if running else None,
             "log_path": str(loop.log_path),
-            "next_cycle": next_scheduled_cycle(log_rows) if running else None,
+            "next_cycle": upcoming_cycle_iso(settings.cycle_minutes, running=running),
         },
         "kill_switch": kill_switch_engaged(conn),
         "kill_note": None if flag is None else flag["note"],
@@ -297,6 +313,9 @@ def session_snapshot(
         "account": dict(account) if account else None,
         "last_cycle": last_payload,
         "positions": [dict(p) for p in positions],
+        "positions_as_of_cycle_id": pos_cycle_id,
+        "positions_captured_at": pos_captured_at,
+        "last_decision": dict(last_decision) if last_decision else None,
         "cycles": [dict(r) for r in recent_cycles],
         "decisions": [dict(r) for r in recent_decisions],
         "rejection_breakdown": [dict(r) for r in rejection_breakdown],
@@ -411,8 +430,7 @@ class DashboardApp:
         return _json_bytes({"error": "not found"}, 404)
 
     def _reconcile(self) -> tuple[int, bytes, str]:
-        from trader.broker import BrokerError
-        from trader.db import record_fill
+        from trader.execution import reconcile_fills
 
         try:
             broker = make_broker(self.settings)
@@ -420,39 +438,24 @@ class DashboardApp:
             return _json_bytes({"ok": False, "message": str(exc)}, 400)
         conn = connect(self.settings.db_path)
         try:
-            pending = unreconciled_orders(conn)
-            done = skipped = 0
-            fills: list[dict[str, Any]] = []
-            for row in pending:
-                try:
-                    fill = broker.get_order(row["broker_order_id"])
-                except BrokerError as exc:
-                    return _json_bytes({"ok": False, "message": str(exc)}, 502)
-                if not fill.is_terminal:
-                    skipped += 1
-                    continue
-                record_fill(
-                    conn,
-                    row["id"],
-                    final_status=fill.status,
-                    filled_qty=fill.filled_qty,
-                    filled_avg_price=fill.filled_avg_price,
-                    filled_at=fill.filled_at.isoformat() if fill.filled_at else None,
-                )
-                done += 1
-                fills.append(
-                    {
-                        "symbol": row["symbol"],
-                        "status": fill.status,
-                        "filled_qty": fill.filled_qty,
-                        "filled_avg_price": fill.filled_avg_price,
-                    }
-                )
-            return _json_bytes(
-                {"ok": True, "reconciled": done, "still_open": skipped, "fills": fills}
-            )
+            results = reconcile_fills(conn, broker)
+            done = sum(1 for e in results if e["status"] == "reconciled")
+            skipped = sum(1 for e in results if e["status"] == "open")
+            fills = [
+                {
+                    "symbol": e["symbol"],
+                    "status": e.get("final_status"),
+                    "filled_qty": e.get("filled_qty"),
+                    "filled_avg_price": e.get("filled_avg_price"),
+                }
+                for e in results
+                if e["status"] == "reconciled"
+            ]
         finally:
             conn.close()
+        return _json_bytes(
+            {"ok": True, "reconciled": done, "still_open": skipped, "fills": fills}
+        )
 
 
 def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:

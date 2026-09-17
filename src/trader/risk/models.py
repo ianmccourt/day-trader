@@ -88,6 +88,9 @@ class RiskState:
     #: True once max_daily_loss has fired today. Latched in the DB by the
     #: execution layer so an intraday recovery does not re-enable trading.
     daily_loss_halted: bool = False
+    #: Symbols that already had a submitted order (or a broker stop/TP fill)
+    #: today. Fresh entries in those names are same-day re-entry.
+    symbols_traded_today: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def total_exposure(self) -> float:
@@ -135,4 +138,5 @@ class RiskState:
             orders_today=ctx.orders_today,
             orders_this_cycle=ctx.orders_this_cycle,
             daily_loss_halted=daily_loss_halted,
+            symbols_traded_today=ctx.symbols_traded_today,
         )

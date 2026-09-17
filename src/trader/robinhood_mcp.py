@@ -19,7 +19,7 @@ import webbrowser
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -31,8 +31,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 from pydantic import AnyUrl
 
-from trader.broker import MAX_BARS, BrokerError, Clock, OrderFill, OrderReceipt
-from trader.constants import MARKET_TZ, RTH_CLOSE, RTH_OPEN
+from trader.broker import MAX_BARS, BrokerError, Clock, OrderFill, OrderReceipt, weekday_rth_clock
 from trader.db import iso, utcnow
 
 #: Official Robinhood Agentic MCP endpoint. Not configurable — same idea as
@@ -277,37 +276,6 @@ def bind_order_args(
                 "refusing to submit without the requested protection"
             )
     return args
-
-
-def weekday_rth_clock(now: datetime | None = None) -> Clock:
-    """Weekday 09:30-16:00 America/New_York. Holidays and early closes are wrong."""
-    now = (now or datetime.now(MARKET_TZ)).astimezone(MARKET_TZ)
-    open_t = now.replace(hour=RTH_OPEN[0], minute=RTH_OPEN[1], second=0, microsecond=0)
-    close_t = now.replace(hour=RTH_CLOSE[0], minute=RTH_CLOSE[1], second=0, microsecond=0)
-    weekday = now.weekday() < 5
-    is_open = weekday and open_t <= now < close_t
-
-    def _next_open_after(day: datetime, *, skip_today: bool) -> datetime:
-        candidate = day.replace(hour=RTH_OPEN[0], minute=RTH_OPEN[1], second=0, microsecond=0)
-        if skip_today or candidate <= day or candidate.weekday() >= 5:
-            candidate = candidate + timedelta(days=1)
-            while candidate.weekday() >= 5:
-                candidate += timedelta(days=1)
-            candidate = candidate.replace(
-                hour=RTH_OPEN[0], minute=RTH_OPEN[1], second=0, microsecond=0
-            )
-        return candidate
-
-    if is_open:
-        next_open = _next_open_after(now, skip_today=True)
-        next_close = close_t
-    elif weekday and now < open_t:
-        next_open = open_t
-        next_close = close_t
-    else:
-        next_open = _next_open_after(now, skip_today=True)
-        next_close = next_open.replace(hour=RTH_CLOSE[0], minute=RTH_CLOSE[1])
-    return Clock(timestamp=now, is_open=is_open, next_open=next_open, next_close=next_close)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

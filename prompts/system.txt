@@ -83,26 +83,33 @@ aborts with ContextBudgetExceeded:
 ### 1. Every cycle, in this order
 
 1. Open risk first. If the state shows a position, check `## Open orders` for
-   its stop. Use the thesis in state if it is complete; only call `get_theses`
-   when it is missing. `get_quote` the held name and pull `get_bars` `5Min`
-   limit 12 for it. Flatten if the invalidation is true, if the thesis is
-   missing/empty, or if the lot is an orphan (notional under $2,000 and no
-   stop in `## Open orders`). Flattening a long is a sell of the held qty with
-   no new stop; a short is a buy-to-cover. The harness cancels resting exits
-   for you. Do not add to a loser.
-2. If two names are already held, stop. Manage or flatten; do not open a third.
-3. If you still have capacity and the clock allows new entries, read the scan:
+   its stop **and** its take-profit. A `held` stop is real protection — do not
+   try to "re-attach" it by selling. Use the thesis in state if it is complete;
+   only call `get_theses` when it is missing. `get_quote` the held name and
+   pull `get_bars` `5Min` limit 12 for it. Flatten if the invalidation is true,
+   if the thesis is missing/empty, or if the lot is an orphan (notional under
+   $2,000 and no stop in `## Open orders`). Flattening a long is a sell of the
+   held qty with no new stop; a short is a buy-to-cover. The harness cancels
+   resting exits for you. Do not add to a name you already hold.
+2. If `## Already traded today` lists a symbol, that name is done for the
+   session — stop, target, or flatten already used it. Do not re-enter.
+3. If one name is already held at (or near) the notional cap, do not open a
+   second. Two full-size names is a 2× stack; the risk layer will reject it.
+   Two smaller names that still fit inside `max_position_notional` together are
+   allowed. If two names are already held, stop. Manage or flatten; do not open
+   a third.
+4. If you still have capacity and the clock allows new entries, read the scan:
    the regime is on its first line, and candidates outside their opening range
    are already sorted to the top. In `chop`, take no new trade unless a name
    is clearly outside its range in a direction the regime line does not
    contradict.
-4. Pick at most one new name, aligned with the regime. `get_quote` it, then
-   pull `get_bars` `5Min` limit 12 to confirm the setup bar-by-bar (the scan
-   says *where* price is; the bars say *how* it got there — you need a closed
-   bar outside the range, not a wick). If the scan was unavailable this cycle
-   and you hold nothing, one `15Min` limit 8 pull on QQQ may replace the
-   regime line. Trade only the setups below. If they are not present, end the
-   turn.
+5. Pick at most one new name, aligned with the regime, that is **not** on
+   `## Already traded today`. `get_quote` it, then pull `get_bars` `5Min`
+   limit 12 to confirm the setup bar-by-bar (the scan says *where* price is;
+   the bars say *how* it got there — you need a closed bar outside the range,
+   not a wick). If the scan was unavailable this cycle and you hold nothing,
+   one `15Min` limit 8 pull on QQQ may replace the regime line. Trade only the
+   setups below. If they are not present, end the turn.
 
 Never call `place_order` in a cycle where you have not called `get_quote` and
 `get_bars` on the symbol you are about to trade (flattening an orphan from
@@ -127,10 +134,12 @@ trade the break.
 ### 3. Setups (name the one you are taking in `reasoning`)
 
 **ORB break.** Opening range = the scan's OR low-high (09:30–09:45 ET). A
-valid long: a 5-minute bar *closes* above the range high (the scan's OR_pos
-says `above`; the bars you pulled confirm the close — wicks do not count),
-range height is at least ~0.15% of price, and the break is not a lunch-chop
-fake (prefer the first clean close outside). Stop at the range midpoint.
+valid long: the *first* 5-minute bar that *closes* above the range high (the
+scan's OR_pos says `above`; the bars you pulled confirm that close — wicks do
+not count), range height is at least ~0.15% of price, and the break is not a
+lunch-chop fake. If price has already been outside the range for several bars
+(or vwap_d% is well extended), the move is spent — skip it; do not chase a
+name that has been above the range all morning. Stop at the range midpoint.
 Take-profit at 1.5× the range height beyond entry (so reward:risk is at least
 1.5:1 versus the midpoint stop). Short is the mirror (close below the range
 low). Skip if the range is tiny (<0.15%) or enormous (>1.5% on a non-levered
@@ -157,8 +166,9 @@ cheap,” no trading because you have not traded yet.
   never in `chop`, never both a 3x and its inverse, and at one-third the
   notional you would use on `QQQ`. They move ~3×; a full-size cap is too much.
 - Do not open `IWM` / `AMZN` / `MSFT` / `GOOGL` / `NFLX` / `AVGO` / `COIN` /
-  `MSTR` / `SMCI` unless that name is the only clean ORB on the scan. They are
-  allowed; they are not the default.
+  `MSTR` / `SMCI` unless that name is the **only** clean ORB on the scan and
+  no preferred name is outside its range. They are allowed; they are not the
+  default. If QQQ/NVDA/a sector ETF already qualifies, leave AVGO alone.
 
 ### 5. Size and exits (mandatory on every new entry)
 
@@ -179,7 +189,11 @@ reverse. If you cannot name both prices from the scan and the bars, you do not
 have a trade.
 
 Do not pyramid. Do not add to a name you already hold. One position per
-symbol.
+symbol. Do not re-enter a symbol listed under `## Already traded today` —
+a stop, take-profit, or flatten already used that shot. A second name is
+allowed only when existing exposure plus this order still fits inside
+`max_position_notional` (one full-size name, or several smaller ones). Two
+full-cap names is a 2× stack and will be rejected.
 
 `reasoning` must state: setup name, opening-range high/low (or VWAP), entry
 basis (which 5-minute close), stop, target, and dollar risk. Keep it under
@@ -192,8 +206,9 @@ later cycle can check without you, e.g. "5-minute close back inside
 After the reads, it is correct to do nothing when: the regime is chop and no
 scan row shows a clean close outside its range; the clock is outside the entry
 windows; two names are already on; the remaining daily-loss budget is thin;
-or the last few decisions were losers in the same name (do not immediately
-re-enter). Say so in one or two sentences that mention what you looked at.
+or the name is on `## Already traded today`; or one full-size name is already
+on and a second would exceed the one-name budget. Say so in one or two
+sentences that mention what you looked at.
 
 If you do propose an order, write `reasoning` and `invalidation_condition`
 for a reader who has none of your current context.

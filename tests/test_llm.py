@@ -246,7 +246,7 @@ def test_two_orders_in_one_assistant_turn_still_yield_one(conn, broker) -> None:
 
 
 def test_two_orders_execute_when_the_per_cycle_cap_allows(conn, broker) -> None:
-    order = (
+    aapl = (
         WRITE_TOOL,
         {
             "action": "buy",
@@ -256,7 +256,17 @@ def test_two_orders_execute_when_the_per_cycle_cap_allows(conn, broker) -> None:
             "invalidation_condition": "i",
         },
     )
-    client = FakeAnthropic([tool_response(order, order), text_response("done")])
+    spy = (
+        WRITE_TOOL,
+        {
+            "action": "buy",
+            "symbol": "SPY",
+            "qty": 1,
+            "reasoning": "r",
+            "invalidation_condition": "i",
+        },
+    )
+    client = FakeAnthropic([tool_response(aapl, spy), text_response("done")])
     agent, ctx = make(conn, broker, client, config=replace(CONFIG, max_orders_per_cycle=3))
     result = agent.run(ctx)
 
@@ -294,6 +304,7 @@ def test_the_second_order_sees_the_fill_from_the_first(conn, broker) -> None:
     assert broker.submitted == [{"symbol": "AAPL", "qty": 40.0, "side": "buy"}]
     payload = json.loads(result.tool_calls[1]["result"])
     assert payload["approved"] is False
+    assert "no_pyramid" in payload["failed_checks"]
     assert "max_position_notional" in payload["failed_checks"]
 
 

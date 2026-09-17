@@ -268,16 +268,31 @@ def evaluate(
         "WHERE c.trading_day BETWEEN ? AND ? ORDER BY d.id",
         (start, end),
     ).fetchall()
-    report.proposals = sum(1 for d in decisions if d["action"] in ("buy", "sell"))
-    submitted = [d for d in decisions if d["broker_order_id"]]
+    def _broker_exit(row: sqlite3.Row) -> bool:
+        return (row["outcome"] or "").startswith("broker_exit:")
+
+    report.proposals = sum(
+        1
+        for d in decisions
+        if d["action"] in ("buy", "sell") and not _broker_exit(d)
+    )
+    submitted = [
+        d for d in decisions if d["broker_order_id"] and not _broker_exit(d)
+    ]
     report.orders_submitted = len(submitted)
     report.orders_unreconciled = sum(1 for d in submitted if d["final_status"] is None)
     report.orders_filled = sum(1 for d in submitted if d["final_status"] == "filled")
-    # Match over orders that filled *or* have not been reconciled yet, and
-    # exclude ones the broker is known to have canceled/rejected/expired. An
+    # Match over agent fills plus broker-side stop/take-profit fills. Exclude
+    # ones the broker is known to have canceled/rejected/expired. An
     # unreconciled order falls back to the risk layer's reference price, so
     # count those separately — the win rate carries that caveat.
-    usable = [d for d in submitted if d["final_status"] in ("filled", None)]
+    usable = [
+        d
+        for d in decisions
+        if d["broker_order_id"]
+        and d["action"] in ("buy", "sell")
+        and d["final_status"] in ("filled", None)
+    ]
     report.prices_estimated = sum(
         1 for d in usable if d["filled_avg_price"] is None and d["reference_price"] is not None
     )

@@ -414,6 +414,72 @@ def test_no_unintended_short_can_be_enabled_by_config() -> None:
     assert checks.no_unintended_short(sell(qty=1000), s) == (True, "")
 
 
+# --- no_pyramid ------------------------------------------------------------
+
+
+def test_no_pyramid_allows_a_fresh_name() -> None:
+    assert checks.no_pyramid(buy(), state()) == (True, "")
+
+
+def test_no_pyramid_rejects_adding_to_a_long() -> None:
+    s = state(positions=held("AAPL", 10, 100.0))
+    ok, reason = checks.no_pyramid(buy(qty=5), s)
+    assert not ok
+    assert "pyramiding" in reason
+
+
+def test_no_pyramid_allows_flattening() -> None:
+    s = state(positions=held("AAPL", 10, 100.0))
+    assert checks.no_pyramid(sell(qty=10), s) == (True, "")
+    assert checks.no_pyramid(sell(qty=4), s) == (True, "")
+
+
+# --- no_same_day_reentry ---------------------------------------------------
+
+
+def test_no_same_day_reentry_allows_a_first_entry() -> None:
+    assert checks.no_same_day_reentry(buy(), state()) == (True, "")
+
+
+def test_no_same_day_reentry_rejects_reopening_a_traded_name() -> None:
+    s = state(symbols_traded_today=frozenset({"AAPL"}))
+    ok, reason = checks.no_same_day_reentry(buy(), s)
+    assert not ok
+    assert "already traded today" in reason
+
+
+def test_no_same_day_reentry_allows_flattening_an_open_lot() -> None:
+    s = state(
+        positions=held("AAPL", 10, 100.0),
+        symbols_traded_today=frozenset({"AAPL"}),
+    )
+    assert checks.no_same_day_reentry(sell(qty=10), s) == (True, "")
+
+
+# --- one_name_budget -------------------------------------------------------
+
+
+def test_one_name_budget_allows_a_lone_full_size_name() -> None:
+    assert checks.one_name_budget(buy(qty=50), state()) == (True, "")  # $5,000 on empty book
+
+
+def test_one_name_budget_rejects_a_second_full_size_name() -> None:
+    s = state(positions=held("MSFT", 50, 100.0))  # $5,000 already
+    ok, reason = checks.one_name_budget(buy(symbol="AAPL", qty=50), s)
+    assert not ok
+    assert "one-name budget" in reason
+
+
+def test_one_name_budget_allows_two_smaller_names() -> None:
+    s = state(positions=held("MSFT", 10, 100.0))  # $1,000
+    assert checks.one_name_budget(buy(qty=10), s) == (True, "")  # +$1,000 still inside $5,000
+
+
+def test_one_name_budget_allows_flattening() -> None:
+    s = state(positions=held("AAPL", 50, 100.0))
+    assert checks.one_name_budget(sell(qty=50), s) == (True, "")
+
+
 # --- the registry itself ---------------------------------------------------
 
 

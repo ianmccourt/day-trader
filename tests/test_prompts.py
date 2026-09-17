@@ -72,6 +72,8 @@ def test_the_system_prompt_is_the_playbook() -> None:
         "stop_price",
         "take_profit",
         "invalidation",
+        "already traded today",
+        "do not pyramid",
     ):
         assert required in system, f"playbook missing {required!r}"
     # Fat bar pulls blow the prompt budget (cycles 69-72, 2026-09-11).

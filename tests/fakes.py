@@ -28,6 +28,13 @@ class FakeBroker:
     open_orders: list[dict[str, Any]] = field(default_factory=list)
     #: Per-symbol overrides for get_scan_data; anything absent is synthesized.
     scan_data: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Optional get_order overrides, including nested bracket legs for tests.
+    order_fills: dict[str, OrderFill] = field(default_factory=dict)
+    #: Exchange-local (hour, minute) the clock reports. Fixed mid-morning by
+    #: default so tests are deterministic: run_cycle's no-entry-window gate
+    #: reads clock.timestamp, and a wall-clock default would flip test
+    #: behaviour whenever the suite runs after 14:30 ET.
+    clock_local_time: tuple[int, int] = (10, 0)
 
     def _check(self, name: str) -> None:
         self.calls.append(name)
@@ -36,14 +43,15 @@ class FakeBroker:
 
     def get_clock(self) -> Clock:
         self._check("get_clock")
-        now = utcnow()
+        hour, minute = self.clock_local_time
+        now = utcnow().astimezone(MARKET_TZ).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
         return Clock(
             timestamp=now,
             is_open=self.is_open,
             next_open=now + timedelta(hours=1),
-            next_close=now.astimezone(MARKET_TZ).replace(
-                hour=16, minute=0, second=0, microsecond=0
-            ),
+            next_close=now.replace(hour=16, minute=0, second=0, microsecond=0),
         )
 
     def get_account(self) -> dict[str, Any]:
@@ -129,6 +137,8 @@ class FakeBroker:
 
     def get_order(self, order_id: str) -> OrderFill:
         self._check("get_order")
+        if order_id in self.order_fills:
+            return self.order_fills[order_id]
         return OrderFill(
             order_id=order_id,
             status="filled",

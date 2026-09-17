@@ -25,7 +25,14 @@ from trader.dashboard import (
     session_snapshot,
     tail_log,
 )
-from trader.db import connect, open_cycle, record_decision, utcnow
+from trader.db import (
+    connect,
+    iso,
+    open_cycle,
+    record_account,
+    record_decision,
+    utcnow,
+)
 from trader.risk.config import RiskConfig
 from trader.robinhood_mcp import ROBINHOOD_MCP_URL
 from trader.state import trading_day_for
@@ -165,6 +172,20 @@ def test_next_scheduled_cycle_follows_start_and_stop() -> None:
     assert next_scheduled_cycle(rows) is None
 
 
+def test_upcoming_cycle_is_the_next_grid_fire_not_process_start() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from trader.dashboard import upcoming_cycle_iso
+
+    et = ZoneInfo("America/New_York")
+    now = datetime(2026, 9, 11, 11, 46, tzinfo=et)
+    assert upcoming_cycle_iso(5, running=False, now=now) is None
+    nxt = upcoming_cycle_iso(5, running=True, now=now)
+    assert nxt is not None
+    assert nxt.startswith("2026-09-11T11:50:00")
+
+
 def test_loop_process_start_and_stop(tmp_path: Path) -> None:
     loop = LoopProcess(pid_path=tmp_path / "t.pid", log_path=tmp_path / "t.jsonl")
     started = loop.start(
@@ -258,11 +279,12 @@ def test_snapshot_never_includes_env_secrets(
     assert "sk-ant-secret" not in dumped
 
 
-def test_positions_render_from_the_latest_snapshot(
-    conn: sqlite3.Connection, settings: Settings
-) -> None:
-    cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
-    p = position("AAPL", 10, 100.0, 101.0)
+def _loop() -> LoopProcess:
+    return LoopProcess(pid_path=Path("/tmp/x.pid"), log_path=Path("/tmp/x.log"))
+
+
+def _put_position(conn: sqlite3.Connection, cycle_id: int, symbol: str, qty: float) -> None:
+    p = position(symbol, qty, 100.0, 101.0)
     conn.execute(
         "INSERT INTO positions_snapshot(cycle_id, symbol, qty, avg_price, current_price, "
         "market_value, unrealized_pl, captured_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -277,13 +299,53 @@ def test_positions_render_from_the_latest_snapshot(
             utcnow().isoformat(),
         ),
     )
-    snap = session_snapshot(
+
+
+def _put_account(conn: sqlite3.Connection, cycle_id: int) -> None:
+    record_account(
         conn,
-        settings,
-        loop=LoopProcess(pid_path=Path("/tmp/x.pid"), log_path=Path("/tmp/x.log")),
-        risk=None,
-        risk_error=None,
-        risk_source="risk.toml",
+        cycle_id,
+        {
+            "equity": 99_994.75,
+            "last_equity": 100_000.0,
+            "cash": 99_994.75,
+            "buying_power": 200_000.0,
+            "long_market_value": 0.0,
+            "short_market_value": 0.0,
+            "captured_at": iso(utcnow()),
+        },
+    )
+
+
+def test_positions_render_from_the_latest_snapshot(
+    conn: sqlite3.Connection, settings: Settings
+) -> None:
+    cycle_id = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
+    _put_position(conn, cycle_id, "AAPL", 10)
+    snap = session_snapshot(
+        conn, settings, loop=_loop(), risk=None, risk_error=None, risk_source="risk.toml"
     )
     assert snap["positions"][0]["symbol"] == "AAPL"
     assert snap["positions"][0]["qty"] == 10
+    assert snap["positions_as_of_cycle_id"] == cycle_id
+
+
+def test_a_flat_later_cycle_clears_stale_positions(
+    conn: sqlite3.Connection, settings: Settings
+) -> None:
+    """Yesterday's lot must not linger after a later cycle snapshotted a flat book."""
+    held = open_cycle(conn, started_at=utcnow(), trading_day="2026-09-10")
+    _put_account(conn, held)
+    _put_position(conn, held, "SPY", 1)
+    flat = open_cycle(conn, started_at=utcnow(), trading_day=trading_day_for(utcnow()))
+    _put_account(conn, flat)
+    record_decision(
+        conn, cycle_id=flat, action="no_action", reasoning="chop, no clean ORB"
+    )
+    snap = session_snapshot(
+        conn, settings, loop=_loop(), risk=None, risk_error=None, risk_source="risk.toml"
+    )
+    assert snap["positions"] == []
+    assert snap["positions_as_of_cycle_id"] == flat
+    assert snap["last_decision"]["action"] == "no_action"
+    assert "chop" in snap["last_decision"]["reasoning"]
