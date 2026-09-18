@@ -349,3 +349,59 @@ def test_a_flat_later_cycle_clears_stale_positions(
     assert snap["positions_as_of_cycle_id"] == flat
     assert snap["last_decision"]["action"] == "no_action"
     assert "chop" in snap["last_decision"]["reasoning"]
+
+
+def test_snapshot_includes_performance_and_equity_history(
+    conn: sqlite3.Connection, settings: Settings
+) -> None:
+    day1 = "2026-09-10"
+    day2 = "2026-09-11"
+    c1 = open_cycle(conn, started_at=utcnow(), trading_day=day1)
+    conn.execute(
+        "UPDATE cycles SET status = 'ok', ended_at = ?, model = 'claude-test', "
+        "prompt_tokens = 100, completion_tokens = 50, duration_ms = 900 WHERE cycle_id = ?",
+        (utcnow().isoformat(), c1),
+    )
+    record_account(
+        conn,
+        c1,
+        {
+            "equity": 100_000.0,
+            "last_equity": 100_000.0,
+            "cash": 100_000.0,
+            "buying_power": 200_000.0,
+            "long_market_value": 0.0,
+            "short_market_value": 0.0,
+            "captured_at": iso(utcnow()),
+        },
+    )
+    c2 = open_cycle(conn, started_at=utcnow(), trading_day=day2)
+    conn.execute(
+        "UPDATE cycles SET status = 'ok', ended_at = ?, model = 'claude-test', "
+        "prompt_tokens = 120, completion_tokens = 60, duration_ms = 800 WHERE cycle_id = ?",
+        (utcnow().isoformat(), c2),
+    )
+    record_account(
+        conn,
+        c2,
+        {
+            "equity": 100_500.0,
+            "last_equity": 100_000.0,
+            "cash": 100_500.0,
+            "buying_power": 200_000.0,
+            "long_market_value": 0.0,
+            "short_market_value": 0.0,
+            "captured_at": iso(utcnow()),
+        },
+    )
+    snap = session_snapshot(
+        conn, settings, loop=_loop(), risk=None, risk_error=None, risk_source="risk.toml"
+    )
+    assert len(snap["equity_daily"]) == 2
+    assert snap["equity_daily"][0]["equity"] == 100_000.0
+    assert snap["equity_daily"][1]["equity"] == 100_500.0
+    assert snap["performance"]["available"] is True
+    assert snap["performance"]["strategy_return_pct"] == pytest.approx(0.5)
+    assert snap["performance"]["prompt_tokens"] == 220
+    assert snap["model_stats"][0]["model"] == "claude-test"
+    assert snap["model_stats"][0]["cycles"] == 2

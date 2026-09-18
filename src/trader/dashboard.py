@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 from trader.brokers import broker_endpoint, make_broker
 from trader.config import MissingCredential, Settings
+from trader.evaluate import EvaluationError, evaluate
 from trader.constants import BROKER_PAPER, MARKET_TZ
 from trader.db import (
     KILL_SWITCH,
@@ -192,6 +193,77 @@ def next_scheduled_cycle(rows: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def equity_daily(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Last equity snapshot per trading day — the curve the chart draws."""
+    rows = conn.execute(
+        "SELECT c.trading_day, a.equity, a.captured_at "
+        "FROM account_snapshot a JOIN cycles c USING (cycle_id) "
+        "WHERE a.id IN ("
+        "  SELECT MAX(a2.id) FROM account_snapshot a2 "
+        "  JOIN cycles c2 USING (cycle_id) GROUP BY c2.trading_day"
+        ") ORDER BY c.trading_day"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def equity_recent(conn: sqlite3.Connection, *, limit: int = 120) -> list[dict[str, Any]]:
+    """Recent cycle-level equity for intraday detail when history is short."""
+    rows = conn.execute(
+        "SELECT c.trading_day, a.equity, a.captured_at, c.cycle_id "
+        "FROM account_snapshot a JOIN cycles c USING (cycle_id) "
+        "ORDER BY a.id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def model_stats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT model, COUNT(*) AS cycles, "
+        "AVG(duration_ms) AS avg_duration_ms, "
+        "SUM(COALESCE(prompt_tokens, 0)) AS prompt_tokens, "
+        "SUM(COALESCE(completion_tokens, 0)) AS completion_tokens, "
+        "SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors "
+        "FROM cycles WHERE model IS NOT NULL AND TRIM(model) != '' "
+        "GROUP BY model ORDER BY cycles DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def build_performance(
+    conn: sqlite3.Connection,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Evaluate over the full logged span. Broker optional (SPY benchmark)."""
+    bounds = conn.execute(
+        "SELECT MIN(trading_day) AS start_day, MAX(trading_day) AS end_day FROM cycles"
+    ).fetchone()
+    if bounds is None or bounds["start_day"] is None:
+        return {"available": False, "reason": "no cycles logged yet"}
+    start = str(bounds["start_day"])
+    end = str(bounds["end_day"])
+    window = {"start": start, "end": end}
+
+    broker = None
+    if settings.alpaca_api_key and settings.alpaca_secret_key:
+        from trader.broker import AlpacaBroker
+
+        broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key)
+
+    try:
+        report = evaluate(conn, start, end, broker=broker)
+    except EvaluationError as exc:
+        return {"available": False, "reason": str(exc), "window": window}
+
+    data = report.to_dict()
+    trips = data.pop("round_trips", [])
+    data["recent_round_trips"] = trips[-10:]
+    data["round_trip_count"] = len(trips)
+    data["available"] = True
+    data["window"] = window
+    return data
+
+
 def upcoming_cycle_iso(cycle_minutes: int, *, running: bool, now: datetime | None = None) -> str | None:
     """Next RTH grid fire from *now*, not from the process-start log line."""
     if not running:
@@ -233,7 +305,7 @@ def session_snapshot(
     ).fetchone()
     recent_cycles = conn.execute(
         "SELECT cycle_id, started_at, trading_day, status, duration_ms, "
-        "prompt_tokens, completion_tokens, error "
+        "prompt_tokens, completion_tokens, error, model "
         "FROM cycles ORDER BY cycle_id DESC LIMIT 40"
     ).fetchall()
     recent_decisions = conn.execute(
@@ -289,6 +361,7 @@ def session_snapshot(
 
     log_rows = tail_log(loop.log_path)
     running = loop.running()
+    perf = build_performance(conn, settings)
     return {
         "paper": settings.broker == BROKER_PAPER,
         "broker": settings.broker,
@@ -324,6 +397,10 @@ def session_snapshot(
         "risk_error": risk_error,
         "risk_source": risk_source,
         "log": log_rows,
+        "performance": perf,
+        "equity_daily": equity_daily(conn),
+        "equity_recent": equity_recent(conn),
+        "model_stats": model_stats(conn),
     }
 
 

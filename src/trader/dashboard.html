@@ -87,7 +87,32 @@
     dialog pre { white-space: pre-wrap; font: 12px/1.4 var(--mono); max-height: 50vh; overflow: auto; }
     .allow { display: flex; flex-wrap: wrap; gap: 6px; }
     .allow span { font: 11px var(--mono); background: #1c242c; padding: 3px 7px; border-radius: 6px; }
+    .perf-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px;
+      margin-bottom: 14px;
+    }
+    .perf-grid .card { padding: 10px 12px; }
+    .perf-grid .v { font-size: 18px; }
+    .chart-wrap {
+      position: relative; height: 220px; margin-top: 4px;
+      background: #0a0d10; border-radius: 8px; padding: 8px;
+    }
+    .verdict {
+      margin: 10px 0 0; padding: 10px 12px; border-radius: 8px;
+      background: #101820; border: 1px solid var(--line); font-size: 13px;
+    }
+    .section-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
+    }
+    .section-head h2 { margin: 0; }
+    .section-head .meta { color: var(--muted); font-size: 12px; }
+    .model-tag {
+      font: 11px var(--mono); color: var(--blue); background: #152030;
+      border: 1px solid #243040; padding: 3px 8px; border-radius: 999px;
+    }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <header>
@@ -96,6 +121,7 @@
       <h1>Day trader</h1>
       <span id="loop-badge" class="badge off">stopped</span>
       <span id="kill-badge" class="badge off">kill off</span>
+      <span id="model-badge" class="model-tag" hidden></span>
       <span id="toast"></span>
     </div>
     <div class="row">
@@ -107,6 +133,17 @@
   </header>
   <main>
     <section class="cards" id="cards"></section>
+    <section class="card" id="performance-section">
+      <div class="section-head">
+        <h2>Performance</h2>
+        <span id="perf-window" class="meta"></span>
+      </div>
+      <div class="perf-grid" id="perf-metrics"></div>
+      <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+      <div id="perf-verdict" class="verdict muted">Loading performance…</div>
+      <div id="model-stats" style="margin-top:12px"></div>
+      <div id="round-trips" style="margin-top:12px"></div>
+    </section>
     <section class="card">
       <h2>Positions</h2>
       <div id="positions" class="muted">No snapshot yet.</div>
@@ -141,10 +178,23 @@
     const $ = (id) => document.getElementById(id);
     let killOn = false;
     let snap = null;
+    let equityChart = null;
 
     function money(v) {
       if (v === null || v === undefined) return "—";
       return Number(v).toLocaleString(undefined, { style: "currency", currency: "USD" });
+    }
+    function pct(v, digits = 2) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
+      const n = Number(v);
+      const sign = n > 0 ? "+" : "";
+      return `${sign}${n.toFixed(digits)}%`;
+    }
+    function pctClass(v) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return "";
+      const n = Number(v);
+      if (Math.abs(n) < 0.005) return "muted";
+      return n > 0 ? "ok" : "err";
     }
     function toast(msg, cls) {
       const el = $("toast");
@@ -191,6 +241,174 @@
       return null;
     }
 
+    function chartSeries(s) {
+      const daily = s.equity_daily || [];
+      if (daily.length >= 2) {
+        return {
+          label: "Equity (end of day)",
+          points: daily.map((d) => ({ x: d.trading_day, y: Number(d.equity) })),
+        };
+      }
+      const recent = s.equity_recent || [];
+      if (recent.length >= 2) {
+        return {
+          label: "Equity (per cycle)",
+          points: recent.map((d) => ({
+            x: d.captured_at || d.trading_day,
+            y: Number(d.equity),
+          })),
+        };
+      }
+      if (recent.length === 1) {
+        return {
+          label: "Equity",
+          points: [{ x: recent[0].captured_at || recent[0].trading_day, y: Number(recent[0].equity) }],
+        };
+      }
+      return null;
+    }
+
+    function renderEquityChart(s) {
+      const canvas = $("equity-chart");
+      if (!canvas || typeof Chart === "undefined") return;
+      const series = chartSeries(s);
+      if (!series || !series.points.length) {
+        if (equityChart) { equityChart.destroy(); equityChart = null; }
+        return;
+      }
+      const labels = series.points.map((p) => p.x);
+      const data = series.points.map((p) => p.y);
+      const startEq = data[0];
+      const endEq = data[data.length - 1];
+      const up = endEq >= startEq;
+      const color = up ? "#3dd68c" : "#ff5d5d";
+      const fill = up ? "rgba(61, 214, 140, 0.12)" : "rgba(255, 93, 93, 0.12)";
+
+      if (equityChart) {
+        equityChart.data.labels = labels;
+        equityChart.data.datasets[0].data = data;
+        equityChart.data.datasets[0].label = series.label;
+        equityChart.data.datasets[0].borderColor = color;
+        equityChart.data.datasets[0].backgroundColor = fill;
+        equityChart.update("none");
+        return;
+      }
+
+      equityChart = new Chart(canvas, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [{
+            label: series.label,
+            data,
+            borderColor: color,
+            backgroundColor: fill,
+            fill: true,
+            tension: 0.25,
+            pointRadius: labels.length > 40 ? 0 : 2,
+            borderWidth: 2,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  return ` ${money(ctx.parsed.y)}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: "#8b97a4", maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+              grid: { color: "#1b2128" },
+            },
+            y: {
+              ticks: {
+                color: "#8b97a4",
+                callback: (v) => "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }),
+              },
+              grid: { color: "#1b2128" },
+            },
+          },
+        },
+      });
+    }
+
+    function renderPerformance(s) {
+      const perf = s.performance || {};
+      const win = perf.window;
+      $("perf-window").textContent = win
+        ? `${win.start} → ${win.end}`
+        : (s.equity_daily || []).length
+          ? `${(s.equity_daily[0] || {}).trading_day || ""} → ${s.trading_day}`
+          : "";
+
+      const modelBadge = $("model-badge");
+      const activeModel = (s.last_cycle && s.last_cycle.model) || (s.model_stats[0] && s.model_stats[0].model);
+      if (activeModel) {
+        modelBadge.hidden = false;
+        modelBadge.textContent = activeModel;
+      } else {
+        modelBadge.hidden = true;
+      }
+
+      if (!perf.available) {
+        $("perf-metrics").innerHTML = "";
+        $("perf-verdict").className = "verdict muted";
+        $("perf-verdict").textContent = perf.reason || "No performance data yet — run a few cycles first.";
+        $("model-stats").innerHTML = renderModelStats(s.model_stats);
+        $("round-trips").innerHTML = "";
+        renderEquityChart(s);
+        return;
+      }
+
+      const bench = perf.benchmark_return_pct;
+      const benchNote = perf.benchmark_note;
+      $("perf-metrics").innerHTML = [
+        ["Return", pct(perf.strategy_return_pct), `${money(perf.start_equity)} → ${money(perf.end_equity)}`, perf.strategy_return_pct],
+        ["vs SPY", bench != null ? pct(perf.excess_vs_benchmark_pct) : "n/a", bench != null ? `SPY ${pct(bench)}` : (benchNote || "benchmark unavailable"), perf.excess_vs_benchmark_pct],
+        ["Win rate", perf.win_rate_pct != null ? `${perf.win_rate_pct.toFixed(1)}%` : "—", perf.round_trip_count ? `${perf.wins}W / ${perf.losses}L · ${perf.round_trip_count} trips` : "no closed trades", null],
+        ["Realized P/L", money(perf.realized_pl), perf.orders_filled ? `${perf.orders_filled} fills` : "no fills", perf.realized_pl],
+        ["Orders", String(perf.orders_submitted || 0), `${perf.orders_unreconciled || 0} unreconciled · ${perf.rejections || 0} rejected`, null],
+        ["Model cost", `${((perf.prompt_tokens || 0) + (perf.completion_tokens || 0)).toLocaleString()} tok`, `${(perf.prompt_tokens || 0).toLocaleString()} in / ${(perf.completion_tokens || 0).toLocaleString()} out`, null],
+      ].map(([k, v, sub, tone]) =>
+        `<div class="card"><div class="k">${esc(k)}</div><div class="v ${tone != null ? pctClass(tone) : ""}">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`
+      ).join("");
+
+      $("perf-verdict").className = "verdict";
+      $("perf-verdict").textContent = perf.verdict || "—";
+      $("model-stats").innerHTML = renderModelStats(s.model_stats);
+
+      const trips = perf.recent_round_trips || [];
+      if (!trips.length) {
+        $("round-trips").innerHTML = "";
+      } else {
+        $("round-trips").innerHTML = `<h2 style="margin:0 0 8px">Recent round trips</h2><table><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Hold</th><th>P/L</th></tr>${
+          trips.slice().reverse().map((t) =>
+            `<tr><td>${esc(t.symbol)}</td><td>${esc(t.qty)}</td><td>${money(t.entry_price)}</td><td>${money(t.exit_price)}</td><td class="muted">${t.holding_hours != null ? `${Number(t.holding_hours).toFixed(1)}h` : "—"}</td><td class="${t.realized_pl >= 0 ? "ok" : "err"}">${money(t.realized_pl)}</td></tr>`
+          ).join("")
+        }</table>`;
+      }
+
+      renderEquityChart(s);
+    }
+
+    function renderModelStats(stats) {
+      if (!stats || !stats.length) return "";
+      return `<h2 style="margin:0 0 8px">Models</h2><table><tr><th>Model</th><th>Cycles</th><th>Errors</th><th>Avg ms</th><th>Tokens</th></tr>${
+        stats.map((m) => {
+          const tok = (m.prompt_tokens || 0) + (m.completion_tokens || 0);
+          return `<tr><td>${esc(m.model)}</td><td>${m.cycles}</td><td class="${m.errors ? "err" : "muted"}">${m.errors || 0}</td><td>${m.avg_duration_ms != null ? Math.round(m.avg_duration_ms) : "—"}</td><td class="muted">${tok.toLocaleString()}</td></tr>`;
+        }).join("")
+      }</table>`;
+    }
+
     function render(s) {
       snap = s;
       killOn = !!s.kill_switch;
@@ -224,6 +442,8 @@
         ["Last cycle", last ? `#${last.cycle_id}` : "—", last ? `${last.status} · ${last.duration_ms || "—"}ms` : ""],
       ].map(([k,v,sub]) => `<div class="card"><div class="k">${k}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
 
+      renderPerformance(s);
+
       const asOf = s.positions_as_of_cycle_id
         ? `as of cycle ${s.positions_as_of_cycle_id}`
           + (s.positions_captured_at ? ` · ${fmtWhen(s.positions_captured_at)}` : "")
@@ -249,12 +469,12 @@
         $("last-decision").innerHTML = "";
       }
 
-      $("cycles").innerHTML = `<table><tr><th>ID</th><th>When</th><th>Status</th><th>ms</th><th>Error</th></tr>${
+      $("cycles").innerHTML = `<table><tr><th>ID</th><th>When</th><th>Model</th><th>Status</th><th>ms</th><th>Error</th></tr>${
         s.cycles.map(c => {
           const err = String(c.error || "").split("\n")[0];
-          const short = err.length > 90 ? err.slice(0, 87) + "…" : err;
-          return `<tr class="clickable" data-id="${c.cycle_id}"><td>${c.cycle_id}</td><td class="muted">${esc(fmtWhen(c.started_at))}</td><td class="${statusClass(c.status)}">${esc(c.status)}</td><td>${c.duration_ms ?? "—"}</td><td class="err">${esc(short)}</td></tr>`;
-        }).join("") || "<tr><td class=muted colspan=5>No cycles yet.</td></tr>"
+          const short = err.length > 60 ? err.slice(0, 57) + "…" : err;
+          return `<tr class="clickable" data-id="${c.cycle_id}"><td>${c.cycle_id}</td><td class="muted">${esc(fmtWhen(c.started_at))}</td><td class="pill">${esc(c.model || "—")}</td><td class="${statusClass(c.status)}">${esc(c.status)}</td><td>${c.duration_ms ?? "—"}</td><td class="err">${esc(short)}</td></tr>`;
+        }).join("") || "<tr><td class=muted colspan=6>No cycles yet.</td></tr>"
       }</table>`;
       $("cycles").querySelectorAll("tr.clickable").forEach((tr) => {
         tr.addEventListener("click", () => showCycle(tr.dataset.id));
