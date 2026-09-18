@@ -678,148 +678,50 @@ reconciliation, and evaluation. **A full unattended session has not been run
 yet** — that is the obvious next step, and `trader run` is what does it.
 
 
-## Strategy RSI: Offline Replay and Promotion
+## RSI: Post-Session Critique (Phase 1-2)
 
-Given a date window of paper history, the system can:
-1. Produce or accept a **candidate playbook** (alternative system prompt)
-2. **Offline replay** that candidate against frozen cycle contexts from the journal
-3. Score it vs actual decisions (order counts, symbol changes, budget usage)
-4. Leave promotion to a human — never auto-edit `risk.toml`, never auto-apply to live `prompts/`, never touch `submit_order`
-
-### Workflow
+A coaching LLM reads the week's results (decisions, rejections, P&L, win rate)
+and proposes playbook changes. This is **read-only** recursive self-improvement:
+the model critiques itself, but changes are never applied automatically.
 
 ```bash
-# 1. Create or receive a candidate playbook
-vim prompts/candidates/my_experiment.txt
-
-# 2. Replay it against historical contexts (no broker calls)
-uv run trader replay --prompt prompts/candidates/my_experiment.txt \
-  --start 2026-09-14 --end 2026-09-18
-
-# Output:
-# replay report saved: data/replays/replay_2026-09-14_2026-09-18_abc12345.json
-#
-# Replay Report: prompts/candidates/my_experiment.txt
-# Window: 2026-09-14 to 2026-09-18
-# Candidate SHA256: abc123...
-#
-# ## Summary
-# Cycles total: 120
-# Cycles changed: 15 (12.5%)
-# Orders added (replay would place, actual did not): 3
-# Orders removed (actual placed, replay would not): 8
-#
-# ## Symbols
-# Novel (replay would trade, actual didn't): QQQ, XLF
-# Avoided (actual traded, replay wouldn't): NVDA
-
-# 3. Review the report and decide
-
-# 4a. If good, promote (dry-run first)
-uv run trader promote --candidate prompts/candidates/my_experiment.txt --dry-run
-
-# 4b. Actually promote
-uv run trader promote --candidate prompts/candidates/my_experiment.txt
-
-# 5. Restart the loop for the change to take effect
-# (prompts/ is loaded once per process, cached)
+uv run trader critique --start 2026-09-14 --end 2026-09-18
 ```
 
-### Scoring
+Outputs:
+- `data/critiques/critique_YYYY-MM-DD_YYYY-MM-DD.json` — the full critique
+  artifact (good decisions, mistakes, proposed rule change, eval summary)
+- Human-readable summary to stdout
 
-Replay compares the candidate's decisions against actual decisions:
-- **Orders added**: replay would place, actual did not
-- **Orders removed**: actual placed, replay would not
-- **Symbols novel**: replay would trade, actual didn't
-- **Symbols avoided**: actual traded, replay wouldn't
-- **Budget notes**: flags cycles where the candidate would exceed `MAX_PROMPT_TOKENS`
-
-Replay does **not** fake fills or compute hypothetical P&L — it scores decision deltas only.
-Use `trader evaluate` on the actual history to judge performance; use replay to judge strategy changes.
-
-### Safety
-
-- **No broker submit**: replay never calls `submit_order`, only loads frozen contexts
-- **Promotion allowlist**: only `prompts/system.txt` and `prompts/cycle_user.txt` can be targeted
-- **Dry-run default**: `trader promote` requires manual confirmation (shows diff, does not apply)
-- **Human gate**: promotion copies the candidate file; operator reviews diff, applies, restarts loop
-
-### What This Does NOT Do
-
-- ❌ **No fake fills**: replay does not compute hypothetical P&L (use actual history for that)
-- ❌ **No risk.toml edits**: risk layer is operator-controlled, not model-controlled
-- ❌ **No auto-promotion**: diffs are shown, never applied without confirmation
-- ❌ **No mid-run rewrite**: prompts cached at process start; restart required
-- ❌ **No tool/domain RSI yet**: this is strategy (playbook) RSI only
-
-### Stub Mode
-
-Like other commands, replay supports `--stub` for testing without an API key:
+With `--propose-diff`, also generates a unified diff targeting
+`prompts/system.txt`:
 
 ```bash
-uv run trader replay --prompt prompts/candidates/test.txt \
-  --start 2026-09-14 --end 2026-09-18 --stub
+uv run trader critique --start 2026-09-14 --end 2026-09-18 --propose-diff
 ```
 
-Returns stub decisions (`no_action` always) with no API call.
+Outputs `data/critiques/critique_YYYY-MM-DD_YYYY-MM-DD.diff`. The diff is never
+applied automatically — you review it, edit `prompts/system.txt` manually if
+appropriate, and restart the loop for the change to take effect.
 
-## ORB Historical Backtest
+### What critique does NOT do
 
-Prove or falsify the discretionary ORB (Opening Range Breakout) playbook
-parameters with a historical backtest over liquid names. First-evidence pass:
-win rate, avg R, regime-conditional stats, time-of-day sensitivity.
+- **Never edits `risk.toml`** — the risk layer is operator-controlled, not
+  model-controlled
+- **Never applies changes at runtime** — prompts are loaded once per process
+  (cached), and mid-run rewrites would break that assumption
+- **Never edits code** — `src/`, tests, and constants are off-limits
+
+The critique can only *propose* a change to the playbook. Applying it requires
+human review and a process restart, which is visible in git history.
+
+### Stub mode
+
+Like `trader cycle --stub`, the critique command supports `--stub` for testing
+without an Anthropic key:
 
 ```bash
-# Stub mode with fixture data (always works, no broker keys)
-uv run trader backtest --stub
-
-# With date range and symbols
-uv run trader backtest --start 2026-09-01 --end 2026-09-30 --symbols SPY,QQQ,NVDA --stub
-
-# Live mode with Alpaca historical bars (requires ALPACA_API_KEY)
-uv run trader backtest --start 2026-09-01 --end 2026-09-30 --symbols SPY,QQQ
-
-# Machine-readable output
-uv run trader backtest --start 2026-09-01 --end 2026-09-30 --stub --json
+uv run trader critique --start 2026-09-14 --end 2026-09-18 --stub
 ```
 
-### What It Does
-
-Implements ORB rules from `prompts/system.txt` in code:
-- **Opening range**: 09:30-09:45 ET (first three 5-minute bars)
-- **Entry**: first 5-minute close outside range (above for long, below for short)
-- **Stop**: range midpoint
-- **Target**: 1.5× range height beyond entry (1.5:1 R:R)
-- **Regime filter**: QQQ regime (up/down/chop) from scanner logic
-- **Time windows**: 09:45-12:30 primary, 12:30-14:30 VWAP continuation only
-- Uses **closed bars only** (honest about look-ahead)
-
-### Metrics
-
-- Total trades, winners, losers, win rate
-- Avg R, total R
-- By regime (up/down/chop): trades, win rate, avg R, total R
-- By entry hour (ET): trades, win rate, avg R
-- Sample trades with entry/exit details
-
-### Data Sources
-
-- **Stub mode** (`--stub`): fixture data for SPY/QQQ with known ORB setups
-- **Live mode**: Alpaca historical 5-minute bars (requires `ALPACA_API_KEY`)
-- Report saved to `data/backtests/orb_*.json`
-
-### What It Proves (and Doesn't)
-
-✅ First evidence of ORB edge (or lack thereof) on historical liquid names  
-✅ Regime filter effectiveness (do `up` trades outperform `chop` trades?)  
-✅ Time-of-day sensitivity (morning breakouts vs afternoon continuations)  
-
-❌ Not walk-forward optimized (no parameter search)  
-❌ Small sample? Say so in the output  
-❌ Multi-day paper PnL still separate (next step after this)  
-
-**Non-goals:**
-- No automatic parameter optimization
-- No changing `risk.toml` or live prompts based on results
-- No fake significance theater
-- No ORB fill simulation (playbook still drives live decisions)
+Returns a stub critique (`"(stub mode: no real critique)"`) with no API call.
