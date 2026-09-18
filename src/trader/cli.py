@@ -37,6 +37,13 @@ from trader.evaluate import EvaluationError, evaluate, format_report
 from trader.execution import reconcile_fills
 from trader.llm import AnthropicAgent
 from trader.prompts import PromptError
+from trader.replay import (
+    ReplayError,
+    format_replay,
+    promote_candidate,
+    replay_playbook,
+    save_replay,
+)
 from trader.risk.checks import CHECK_NAMES
 from trader.risk.config import (
     DEFAULT_RISK_CONFIG_PATH,
@@ -334,6 +341,65 @@ def cmd_kill(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replay(settings: Settings, args: argparse.Namespace) -> int:
+    """Offline replay: run a candidate playbook against historical contexts."""
+    conn = connect(settings.db_path)
+    
+    start = args.start or trading_day_for(utcnow())
+    end = args.end or trading_day_for(utcnow())
+    candidate_path = Path(args.prompt)
+    
+    report = replay_playbook(
+        conn,
+        candidate_path,
+        start,
+        end,
+        api_key=settings.anthropic_api_key if not args.stub else None,
+        stub=args.stub,
+    )
+    
+    # Save report
+    report_path = save_replay(report)
+    print(f"replay report saved: {report_path}")
+    
+    # Output
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+    else:
+        print("\n" + format_replay(report))
+    
+    # Warnings
+    if report.budget_exceeded_count > 0:
+        print(
+            f"\n⚠️  Warning: {report.budget_exceeded_count} cycle(s) exceeded budget with this candidate",
+            file=sys.stderr,
+        )
+    
+    if report.orders_added > report.cycles_total * 0.2:
+        print(
+            f"\n⚠️  Warning: replay would add {report.orders_added} orders "
+            f"({100 * report.orders_added / report.cycles_total:.0f}% of cycles) — "
+            "review carefully before promoting",
+            file=sys.stderr,
+        )
+    
+    return 0
+
+
+def cmd_promote(settings: Settings, args: argparse.Namespace) -> int:
+    """Promote a candidate playbook to active (copy to prompts/system.txt)."""
+    candidate_path = Path(args.candidate)
+    target = Path(args.target) if args.target else Path("prompts/system.txt")
+    
+    result = promote_candidate(candidate_path, target, dry_run=args.dry_run)
+    print(result)
+    
+    if not args.dry_run:
+        print("\n✓ Candidate promoted. Restart the loop for the change to take effect.")
+    
+    return 0
+
+
 def cmd_rh_login(settings: Settings, _args: argparse.Namespace) -> int:
     """Interactive OAuth. `trader run` cannot complete a browser login."""
     from trader.robinhood_mcp import interactive_login
@@ -481,6 +547,33 @@ def build_parser() -> argparse.ArgumentParser:
         "rh-login",
         help="authorize the Robinhood Agentic MCP adapter (opens a browser)",
     ).set_defaults(func=cmd_rh_login)
+
+    rep = sub.add_parser(
+        "replay",
+        help="offline replay: run a candidate playbook against historical contexts (Strategy RSI)",
+    )
+    rep.add_argument("--prompt", required=True, help="path to candidate playbook file")
+    rep.add_argument("--start", help="first trading day, YYYY-MM-DD (default: today)")
+    rep.add_argument("--end", help="last trading day, YYYY-MM-DD (default: today)")
+    rep.add_argument("--json", action="store_true", help="machine-readable output")
+    rep.set_defaults(func=cmd_replay)
+
+    prom = sub.add_parser(
+        "promote",
+        help="promote a candidate playbook to active (Strategy RSI)",
+    )
+    prom.add_argument("--candidate", required=True, help="path to candidate playbook file")
+    prom.add_argument(
+        "--target",
+        default="prompts/system.txt",
+        help="target active playbook path (default: prompts/system.txt)",
+    )
+    prom.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show diff without applying (default: true unless omitted)",
+    )
+    prom.set_defaults(func=cmd_promote)
 
     return p
 
