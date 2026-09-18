@@ -127,6 +127,17 @@ real ceiling.
 
 ## Running and monitoring
 
+### Unattended multi-day sessions
+
+To prove operational stability across multiple trading days, see **[UNATTENDED_WEEK.md](UNATTENDED_WEEK.md)** for:
+- Preflight checklist (paper keys, risk config, supervision, alerts)
+- Start/stop commands (systemd/launchd or nohup fallback)
+- Monitoring guide (`trader status`, `trader cycles`, `trader alerts`)
+- Pass/fail criteria for "unattended week proven"
+- Troubleshooting common issues
+
+**Quick start**: Run `./scripts/preflight_unattended.sh` to check readiness, then follow the runbook.
+
 ### Control panel
 
 A local browser UI starts, stops, and monitors the loop. It binds to loopback
