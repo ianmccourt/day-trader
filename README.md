@@ -127,6 +127,91 @@ real ceiling.
 
 ## Running and monitoring
 
+### Running Unattended
+
+For unattended multi-day operation, use a supervisor to restart on exit:
+
+**systemd (Linux):**
+```bash
+# Copy and edit the unit file
+sudo cp deploy/trader.service /etc/systemd/system/
+sudo nano /etc/systemd/system/trader.service  # adjust paths and user
+
+# Enable and start
+sudo systemctl enable trader.service
+sudo systemctl start trader.service
+
+# Check status and logs
+sudo systemctl status trader.service
+sudo journalctl -u trader.service -f
+```
+
+**launchd (macOS):**
+```bash
+# Copy and edit the plist
+cp deploy/com.daytrader.plist ~/Library/LaunchAgents/
+nano ~/Library/LaunchAgents/com.daytrader.plist  # adjust paths
+
+# Load and start
+launchctl load ~/Library/LaunchAgents/com.daytrader.plist
+launchctl start com.daytrader.harness
+
+# Check status
+launchctl list | grep daytrader
+tail -f logs/trader.jsonl
+```
+
+**Manual watchdog (fallback):**
+```bash
+# scripts/watchdog.sh checks heartbeat and restarts if stale
+# Cron this every 5 minutes:
+*/5 * * * * /path/to/day-trader/scripts/watchdog.sh >> /tmp/watchdog.log 2>&1
+```
+
+### Alerting
+
+Alerts are written to `data/alerts.jsonl` and optionally POSTed to a webhook:
+
+```bash
+# Set webhook in .env (Slack, Discord, etc.)
+TRADER_ALERT_WEBHOOK=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
+# Check recent alerts
+uv run trader alerts
+uv run trader alerts --limit 50 --json
+```
+
+Alerts fire on:
+- **Consecutive error cycles** (3+ in a row)
+- **Kill switch engaged**
+- **Max daily loss latched**
+- **Heartbeat stale** (if watchdog enabled)
+
+Alerts never block the harness — webhook failures are logged and ignored.
+
+### Log Rotation
+
+Logs grow unbounded without rotation. Install the logrotate config:
+
+```bash
+sudo cp deploy/logrotate-trader.conf /etc/logrotate.d/trader
+sudo chown root:root /etc/logrotate.d/trader
+sudo chmod 644 /etc/logrotate.d/trader
+
+# Test rotation
+sudo logrotate -f /etc/logrotate.d/trader
+```
+
+Startup checks warn if logs exceed 500 MB or free disk is below 1 GB:
+
+```bash
+# Warnings only (default)
+uv run trader run
+
+# Fail instead of warning
+uv run trader run --strict
+```
+
 ### Control panel
 
 A local browser UI starts, stops, and monitors the loop. It binds to loopback

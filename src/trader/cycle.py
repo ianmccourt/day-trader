@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from trader.agent import Agent, AgentResult
+from trader.alerts import AlertSink, update_heartbeat
 from trader.broker import Broker, BrokerError
 from trader.constants import MARKET_TZ, NO_NEW_ENTRIES_AFTER_ET
 from trader.db import (
@@ -70,6 +71,7 @@ def run_cycle(
     *,
     risk_config: RiskConfig | None = None,
     force: bool = False,
+    alert_sink: AlertSink | None = None,
 ) -> CycleOutcome:
     """Run exactly one cycle. Never raises: failures are logged and persisted.
 
@@ -115,6 +117,13 @@ def run_cycle(
                 "error": error,
             },
         )
+        
+        # Update heartbeat and check for alerts
+        if alert_sink:
+            update_heartbeat()
+            if status == "error":
+                alert_sink.check_consecutive_errors(conn)
+        
         return CycleOutcome(cycle_id, status, duration_ms, result, execution, error)
 
     # Kill switch is checked at the top of every cycle (SPEC.md risk layer).
@@ -227,5 +236,5 @@ def run_cycle(
         log.error("pricing_failed", extra={"cycle_id": cycle_id}, exc_info=True)
         return finish(STATUS_ERROR, result=result, error=f"{type(exc).__name__}: {exc}")
 
-    execution = place_order(conn, broker, ctx, proposal, risk_config)
+    execution = place_order(conn, broker, ctx, proposal, risk_config, alert_sink=alert_sink)
     return finish(STATUS_OK, result=result, execution=execution)
