@@ -52,6 +52,7 @@ def run_scheduler(
     cycle_minutes: int,
     risk_config: RiskConfig,
     on_cycle: Callable[[CycleOutcome], None] | None = None,
+    alert_sink: Any | None = None,
 ) -> None:
     orphans = reconcile_orphan_cycles(conn)
     if orphans:
@@ -69,7 +70,7 @@ def run_scheduler(
     )
 
     def job() -> None:
-        outcome = run_cycle(conn, broker, agent, risk_config=risk_config)
+        outcome = run_cycle(conn, broker, agent, risk_config=risk_config, alert_sink=alert_sink)
         if on_cycle:
             on_cycle(outcome)
 

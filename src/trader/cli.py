@@ -11,6 +11,7 @@ from typing import Any
 
 from trader import logging_setup
 from trader.agent import Agent, StubAgent
+from trader.alerts import AlertSink, get_recent_alerts
 from trader.broker import AlpacaBroker, Broker, BrokerError
 from trader.brokers import broker_endpoint, make_broker
 from trader.config import MissingCredential, Settings, load_settings
@@ -52,6 +53,7 @@ from trader.risk.config import (
     load_risk_config,
 )
 from trader.scheduler import run_scheduler
+from trader.startup import run_startup_checks, StartupCheckError
 from trader.state import trading_day_for
 
 
@@ -85,13 +87,23 @@ def _risk(args: argparse.Namespace) -> RiskConfig:
 
 def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     config = _risk(args)
+    
+    # Startup checks (warn by default, fail with --strict)
+    checks = run_startup_checks(strict=args.strict)
+    for ok, msg in checks:
+        if not ok:
+            print(f"WARNING: {msg}", file=sys.stderr)
+    
     conn, broker = _open(settings)
+    alert_sink = AlertSink() if not args.no_alerts else None
+    
     run_scheduler(
         conn,
         broker,
         _agent(settings, args, conn, broker, config),
         cycle_minutes=settings.cycle_minutes,
         risk_config=config,
+        alert_sink=alert_sink,
     )
     return 0
 
@@ -100,9 +112,11 @@ def cmd_cycle(settings: Settings, args: argparse.Namespace) -> int:
     config = _risk(args)
     conn, broker = _open(settings)
     reconcile_orphan_cycles(conn)
+    alert_sink = AlertSink() if not args.no_alerts else None
+    
     outcome = run_cycle(
         conn, broker, _agent(settings, args, conn, broker, config),
-        risk_config=config, force=args.force
+        risk_config=config, force=args.force, alert_sink=alert_sink
     )
     summary: dict[str, Any] = {
         "cycle_id": outcome.cycle_id,
@@ -426,7 +440,36 @@ def cmd_rh_login(settings: Settings, _args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_dashboard(settings: Settings, args: argparse.Namespace) -> int:
+def cmd_alerts(settings: Settings, args: argparse.Namespace) -> int:
+    """Show recent alerts."""
+    alerts = get_recent_alerts(limit=args.limit)
+    
+    if args.json:
+        print(json.dumps(alerts, indent=2, default=str))
+        return 0
+    
+    if not alerts:
+        print("No alerts")
+        return 0
+    
+    print(f"Recent alerts (last {len(alerts)}):")
+    for alert in alerts:
+        severity_marker = {
+            "critical": "🔴",
+            "warning": "⚠️ ",
+            "info": "ℹ️ ",
+        }.get(alert.get("severity", "info"), "  ")
+        
+        print(
+            f"{severity_marker} [{alert.get('timestamp')}] "
+            f"{alert.get('severity', 'info').upper()}: {alert.get('event')}"
+        )
+        details = alert.get("details", {})
+        if details:
+            for key, value in details.items():
+                print(f"    {key}: {value}")
+    
+    return 0
     """Local loopback panel. Does not submit orders; start/stop the loop instead."""
     from trader.dashboard import DashboardApp, LoopProcess, serve
 
@@ -454,6 +497,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trader", description=__doc__)
     p.add_argument("--text-logs", action="store_true", help="human-readable logs, not JSON lines")
     p.add_argument(
+        "--strict", action="store_true", help="fail startup checks rather than warning"
+    )
+    p.add_argument(
+        "--no-alerts", action="store_true", help="disable alerting"
+    )
+    p.add_argument(
         "--stub", action="store_true", help="use the Phase 1 stub agent instead of the model"
     )
     p.add_argument(
@@ -472,15 +521,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("run", help="start the scheduled cycle loop (blocking)").set_defaults(
-        func=cmd_run
+    run_parser = sub.add_parser("run", help="start the scheduled cycle loop (blocking)")
+    run_parser.add_argument(
+        "--strict", action="store_true", help="fail startup checks rather than warning"
     )
+    run_parser.add_argument(
+        "--no-alerts", action="store_true", help="disable alerting"
+    )
+    run_parser.set_defaults(func=cmd_run, command="run")
 
     one = sub.add_parser("cycle", help="run a single cycle now")
     one.add_argument(
         "--force", action="store_true", help="run even when the market is closed (dry run)"
     )
-    one.set_defaults(func=cmd_cycle)
+    one.add_argument(
+        "--no-alerts", action="store_true", help="disable alerting"
+    )
+    one.set_defaults(func=cmd_cycle, command="cycle")
 
     sub.add_parser("status", help="reconstruct today's session from the DB").set_defaults(
         func=cmd_status
@@ -548,6 +605,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="authorize the Robinhood Agentic MCP adapter (opens a browser)",
     ).set_defaults(func=cmd_rh_login)
 
+    alerts_parser = sub.add_parser("alerts", help="show recent alerts")
+    alerts_parser.add_argument("--limit", type=int, default=20, help="max alerts to show")
+    alerts_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    alerts_parser.set_defaults(func=cmd_alerts)
+
     rep = sub.add_parser(
         "replay",
         help="offline replay: run a candidate playbook against historical contexts (Strategy RSI)",
@@ -607,6 +669,9 @@ def main(argv: list[str] | None = None) -> int:
     except CritiqueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except StartupCheckError as exc:
+        print(f"error: startup check failed: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

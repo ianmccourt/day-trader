@@ -12,6 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from trader.alerts import AlertSink
 from trader.broker import Broker, BrokerError, OrderFill, OrderReceipt
 from trader.db import (
     get_flag,
@@ -275,6 +276,8 @@ def place_order(
     ctx: CycleContext,
     proposal: Proposal,
     config: RiskConfig,
+    *,
+    alert_sink: AlertSink | None = None,
 ) -> ExecutionResult:
     """Risk-check a proposal and, only if it passes every check, submit it."""
     # Re-read from the DB and the broker rather than trusting ctx: the context
@@ -329,7 +332,15 @@ def place_order(
         # Latch the daily halt the moment the loss check fires, so a later
         # intraday recovery cannot silently re-enable trading.
         if failure.check == "max_daily_loss" and not state.daily_loss_halted:
-            set_flag(conn, daily_halt_flag(ctx.trading_day), "1", note=failure.reason)
+            flag_key = daily_halt_flag(ctx.trading_day)
+            set_flag(conn, flag_key, "1", note=failure.reason)
+            if alert_sink:
+                # Extract loss and threshold from the failure reason if possible
+                alert_sink.alert_daily_loss_latched(
+                    ctx.trading_day,
+                    abs(state.equity_delta_today or 0.0),
+                    config.max_daily_loss,
+                )
 
     if not verdict.approved:
         log.warning(
