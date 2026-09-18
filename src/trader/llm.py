@@ -92,13 +92,7 @@ class AnthropicAgent:
         self.effort = effort
         self.client = client or anthropic.Anthropic(api_key=api_key)
 
-    def _load_system(self) -> str:
-        """Load the system prompt."""
-        return load("system", self.prompt_dir)
-    
-    def _render_user_turn(self, ctx: CycleContext) -> str:
-        """Render the user turn for a cycle."""
-        return render("cycle_user", self.prompt_dir, state=render_state(ctx))
+    # --- budget ------------------------------------------------------------
 
     def _assert_budget(self, system: str, messages: list[dict[str, Any]], label: str) -> int:
         """Count the real assembled prompt and raise if it is over budget.
@@ -118,40 +112,6 @@ class AnthropicAgent:
             )
         log.debug("context_budget", extra={"tokens": tokens, "at": label})
         return tokens
-
-    def _check_headroom(self, system: str, messages: list[dict[str, Any]]) -> bool:
-        """Check if there's sufficient headroom for the mandated workflow.
-        
-        Returns True if continuing is safe, False if we should abort to no_action.
-        The mandated workflow spans 2-3 tool iterations (risk_limits, quote, bars, place_order).
-        If we're already close to the budget before tool results accumulate, abort cleanly.
-        """
-        try:
-            counted = self.client.messages.count_tokens(
-                model=self.model, system=system, messages=messages, tools=TOOL_SCHEMAS
-            )
-            tokens = int(counted.input_tokens)
-            
-            # Reserve 2000 tokens for tool results and thinking blocks
-            # (measured from live cycles: 3 tool calls + thinking = ~1500-2500 tokens)
-            headroom_threshold = self.max_prompt_tokens - 2000
-            
-            if tokens >= headroom_threshold:
-                log.warning(
-                    "budget_headroom_abort",
-                    extra={
-                        "tokens": tokens,
-                        "threshold": headroom_threshold,
-                        "budget": self.max_prompt_tokens,
-                    },
-                )
-                return False
-            
-            return True
-        except Exception:
-            # If token counting fails, allow the cycle to proceed
-            # (the hard budget assertion will catch overruns)
-            return True
 
     # --- request -----------------------------------------------------------
 
@@ -175,25 +135,6 @@ class AnthropicAgent:
         system = load("system", self.prompt_dir)
         user_turn = render("cycle_user", self.prompt_dir, state=render_state(ctx))
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_turn}]
-
-        # Check headroom before starting the tool loop
-        if not self._check_headroom(system, messages):
-            # Abort cleanly to no_action rather than raising mid-playbook
-            return AgentResult(
-                action="no_action",
-                reasoning=(
-                    "Budget headroom insufficient for mandated workflow. "
-                    "Aborting to no_action to prevent mid-cycle budget exceeded."
-                ),
-                model=self.model,
-                prompt_tokens=0,
-                completion_tokens=0,
-                full_prompt="(aborted before API call due to budget headroom)",
-                full_response="(aborted)",
-                tool_calls=[],
-                executions=[],
-                stop_reason="budget_headroom",
-            )
 
         tc = ToolContext(conn=self.conn, broker=self.broker, ctx=ctx, config=self.config)
         tool_calls: list[dict[str, Any]] = []
