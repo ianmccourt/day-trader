@@ -35,6 +35,8 @@ class AgentResult:
     model: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
     full_prompt: str | None = None
     full_response: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)

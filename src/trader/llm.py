@@ -57,6 +57,35 @@ MAX_TOTAL_TOOL_RESULT_CHARS = 4_000
 #: rather than dying mid-playbook with ContextBudgetExceeded.
 HEADROOM_RESERVE_TOKENS = 2_000
 
+#: Default Anthropic prompt-cache TTL. Matches TRADER_CYCLE_MINUTES=5 so
+#: consecutive cycles during RTH usually hit cache reads, not rewrites.
+CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+
+
+def _cached_system(system: str) -> list[dict[str, Any]]:
+    """Wrap the static playbook so tools+system share one cache breakpoint."""
+    return [
+        {
+            "type": "text",
+            "text": system,
+            "cache_control": CACHE_CONTROL,
+        }
+    ]
+
+
+def _usage_input_tokens(usage: Any) -> int:
+    """Billable input tokens: cache reads + cache writes + uncached tail."""
+    read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    created = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    regular = int(getattr(usage, "input_tokens", 0) or 0)
+    return read + created + regular
+
+
+def _usage_cache_tokens(usage: Any) -> tuple[int, int]:
+    read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    created = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    return read, created
+
 
 class ContextBudgetExceeded(RuntimeError):
     """The assembled prompt would exceed MAX_PROMPT_TOKENS.
@@ -149,10 +178,13 @@ class AnthropicAgent:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": MAX_OUTPUT_TOKENS,
-            "system": system,
+            "system": _cached_system(system),
             "messages": messages,
             "tools": TOOL_SCHEMAS,
             "output_config": {"effort": self.effort},
+            # Breakpoint on the system block caches tools+system across cycles;
+            # top-level control advances the breakpoint within the tool loop.
+            "cache_control": CACHE_CONTROL,
         }
         if self.thinking:
             # Adaptive is the current shape for 4.6+; budget_tokens is deprecated.
@@ -193,6 +225,7 @@ class AnthropicAgent:
         tool_calls: list[dict[str, Any]] = []
         tool_result_chars = 0
         prompt_tokens = completion_tokens = 0
+        cache_read_tokens = cache_creation_tokens = 0
         peak_prompt_tokens = 0
         final_text = ""
         stop_reason = None
@@ -203,9 +236,22 @@ class AnthropicAgent:
                 self._assert_budget(system, messages, f"iteration {iteration}"),
             )
             response = self._create(system, messages)
-            prompt_tokens += response.usage.input_tokens
+            read, created = _usage_cache_tokens(response.usage)
+            cache_read_tokens += read
+            cache_creation_tokens += created
+            prompt_tokens += _usage_input_tokens(response.usage)
             completion_tokens += response.usage.output_tokens
             stop_reason = response.stop_reason
+            if read or created:
+                log.debug(
+                    "prompt_cache",
+                    extra={
+                        "cycle_id": ctx.cycle_id,
+                        "iteration": iteration,
+                        "cache_read_tokens": read,
+                        "cache_creation_tokens": created,
+                    },
+                )
 
             if stop_reason == "refusal":
                 details = getattr(response, "stop_details", None)
@@ -281,6 +327,8 @@ class AnthropicAgent:
             model=self.model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
             # The full prompt is the whole assembled conversation, not just the
             # first turn — that is what I need to be able to diff across cycles.
             full_prompt=json.dumps(
@@ -290,6 +338,8 @@ class AnthropicAgent:
                     "tools": [t["name"] for t in TOOL_SCHEMAS],
                     "peak_prompt_tokens": peak_prompt_tokens,
                     "budget": self.max_prompt_tokens,
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_creation_tokens": cache_creation_tokens,
                 },
                 indent=2,
                 default=str,

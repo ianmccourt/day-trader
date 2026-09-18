@@ -9,8 +9,10 @@ import pytest
 
 from tests.fakes import (
     FakeAnthropic,
+    FakeBlock,
     FakeBroker,
     FakeResponse,
+    FakeUsage,
     position,
     text_response,
     tool_response,
@@ -615,6 +617,43 @@ def test_token_usage_accumulates_across_iterations(conn, broker) -> None:
     result = agent.run(ctx)
     assert result.prompt_tokens == 200  # two calls at 100
     assert result.completion_tokens == 100
+
+
+def test_prompt_caching_is_configured(conn, broker) -> None:
+    client = FakeAnthropic([text_response("hi")])
+    agent, ctx = make(conn, broker, client)
+    agent.run(ctx)
+    request = client.requests[0]
+    assert request["cache_control"] == {"type": "ephemeral"}
+    system = request["system"]
+    assert len(system) == 1
+    assert system[0]["type"] == "text"
+    assert system[0]["text"].startswith("You are the decision-making component")
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_total_input_tokens_include_cache_usage(conn, broker) -> None:
+    client = FakeAnthropic(
+        [
+            FakeResponse(
+                content=[FakeBlock("text", text="done")],
+                usage=FakeUsage(
+                    input_tokens=50,
+                    output_tokens=10,
+                    cache_read_input_tokens=2_000,
+                    cache_creation_input_tokens=0,
+                ),
+            )
+        ]
+    )
+    agent, ctx = make(conn, broker, client)
+    result = agent.run(ctx)
+    assert result.prompt_tokens == 2_050
+    assert result.cache_read_tokens == 2_000
+    assert result.cache_creation_tokens == 0
+    logged = json.loads(result.full_prompt)
+    assert logged["cache_read_tokens"] == 2_000
+    assert logged["cache_creation_tokens"] == 0
 
 
 # --- the tool-result budget -------------------------------------------------
