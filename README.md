@@ -676,3 +676,52 @@ Against the live paper account: single cycles (reads, tool loop, budget), one
 1-share SPY order end to end through the risk layer to a confirmed fill,
 reconciliation, and evaluation. **A full unattended session has not been run
 yet** — that is the obvious next step, and `trader run` is what does it.
+
+
+## RSI: Post-Session Critique (Phase 1-2)
+
+A coaching LLM reads the week's results (decisions, rejections, P&L, win rate)
+and proposes playbook changes. This is **read-only** recursive self-improvement:
+the model critiques itself, but changes are never applied automatically.
+
+```bash
+uv run trader critique --start 2026-09-14 --end 2026-09-18
+```
+
+Outputs:
+- `data/critiques/critique_YYYY-MM-DD_YYYY-MM-DD.json` — the full critique
+  artifact (good decisions, mistakes, proposed rule change, eval summary)
+- Human-readable summary to stdout
+
+With `--propose-diff`, also generates a unified diff targeting
+`prompts/system.txt`:
+
+```bash
+uv run trader critique --start 2026-09-14 --end 2026-09-18 --propose-diff
+```
+
+Outputs `data/critiques/critique_YYYY-MM-DD_YYYY-MM-DD.diff`. The diff is never
+applied automatically — you review it, edit `prompts/system.txt` manually if
+appropriate, and restart the loop for the change to take effect.
+
+### What critique does NOT do
+
+- **Never edits `risk.toml`** — the risk layer is operator-controlled, not
+  model-controlled
+- **Never applies changes at runtime** — prompts are loaded once per process
+  (cached), and mid-run rewrites would break that assumption
+- **Never edits code** — `src/`, tests, and constants are off-limits
+
+The critique can only *propose* a change to the playbook. Applying it requires
+human review and a process restart, which is visible in git history.
+
+### Stub mode
+
+Like `trader cycle --stub`, the critique command supports `--stub` for testing
+without an Anthropic key:
+
+```bash
+uv run trader critique --start 2026-09-14 --end 2026-09-18 --stub
+```
+
+Returns a stub critique (`"(stub mode: no real critique)"`) with no API call.

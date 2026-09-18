@@ -26,6 +26,13 @@ from trader.db import (
     set_flag,
     utcnow,
 )
+from trader.critique import (
+    CritiqueError,
+    format_critique,
+    generate_critique,
+    generate_diff,
+    save_critique,
+)
 from trader.evaluate import EvaluationError, evaluate, format_report
 from trader.execution import reconcile_fills
 from trader.llm import AnthropicAgent
@@ -275,6 +282,48 @@ def cmd_evaluate(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_critique(settings: Settings, args: argparse.Namespace) -> int:
+    """Generate a post-session critique: coach LLM reads results and proposes a playbook change."""
+    conn = connect(settings.db_path)
+    broker: Broker | None = None
+    # Critique calls evaluate internally, which optionally fetches SPY benchmark
+    if not args.no_benchmark and settings.alpaca_api_key and settings.alpaca_secret_key:
+        broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key)
+
+    start = args.start or trading_day_for(utcnow())
+    end = args.end or trading_day_for(utcnow())
+
+    critique = generate_critique(
+        conn,
+        start,
+        end,
+        broker=broker,
+        api_key=settings.anthropic_api_key if not args.stub else None,
+        stub=args.stub,
+    )
+
+    # Save critique artifact
+    critique_path = save_critique(critique)
+    print(f"critique saved: {critique_path}")
+
+    # Optionally generate diff
+    if args.propose_diff:
+        diff_path = generate_diff(critique)
+        if diff_path:
+            print(f"proposed diff saved: {diff_path}")
+            print("\nReview the diff, apply manually if appropriate, then restart the loop.")
+        else:
+            print("No diff generated (critique proposes no rule change).")
+
+    # Output
+    if args.json:
+        print(json.dumps(critique.to_dict(), indent=2, default=str))
+    else:
+        print("\n" + format_critique(critique))
+
+    return 0
+
+
 def cmd_kill(settings: Settings, args: argparse.Namespace) -> int:
     conn = connect(settings.db_path)
     if args.state == "status":
@@ -400,6 +449,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ev.set_defaults(func=cmd_evaluate)
 
+    crit = sub.add_parser(
+        "critique",
+        help="post-session critique: coach LLM proposes a playbook change (RSI Phase 1-2)",
+    )
+    crit.add_argument("--start", help="first trading day, YYYY-MM-DD (default: today)")
+    crit.add_argument("--end", help="last trading day, YYYY-MM-DD (default: today)")
+    crit.add_argument("--json", action="store_true", help="machine-readable output")
+    crit.add_argument(
+        "--no-benchmark", action="store_true", help="skip the SPY benchmark (no broker call)"
+    )
+    crit.add_argument(
+        "--propose-diff",
+        action="store_true",
+        help="generate a unified diff for prompts/system.txt (review and apply manually)",
+    )
+    crit.set_defaults(func=cmd_critique)
+
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("state", choices=["on", "off", "status"])
     kill.add_argument("--note", default=None)
@@ -443,6 +509,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except EvaluationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except CritiqueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
