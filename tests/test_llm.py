@@ -496,7 +496,9 @@ def test_a_buy_to_cover_closes_the_short_thesis_and_creates_none(conn, broker) -
 
 
 def test_the_budget_is_checked_before_the_first_api_call(conn, broker) -> None:
-    client = FakeAnthropic([text_response("hi")], token_counts=[MAX_PROMPT_TOKENS + 1])
+    client = FakeAnthropic(
+        [text_response("hi")], token_counts=[500, MAX_PROMPT_TOKENS + 1]
+    )
     agent, ctx = make(conn, broker, client)
 
     with pytest.raises(ContextBudgetExceeded, match=f"over the {MAX_PROMPT_TOKENS} budget"):
@@ -508,7 +510,7 @@ def test_the_budget_is_checked_on_every_iteration_not_just_the_first(conn, broke
     """Tool results accumulate, so the last iteration is the dangerous one."""
     client = FakeAnthropic(
         [tool_response(("get_risk_limits", {})), text_response("done")],
-        token_counts=[500, MAX_PROMPT_TOKENS + 1],
+        token_counts=[500, 500, MAX_PROMPT_TOKENS + 1],
     )
     agent, ctx = make(conn, broker, client)
 
@@ -518,9 +520,22 @@ def test_the_budget_is_checked_on_every_iteration_not_just_the_first(conn, broke
 
 
 def test_the_budget_boundary_is_inclusive(conn, broker) -> None:
-    client = FakeAnthropic([text_response("hi")], token_counts=[MAX_PROMPT_TOKENS])
+    client = FakeAnthropic(
+        [text_response("hi")], token_counts=[MAX_PROMPT_TOKENS - 2001, MAX_PROMPT_TOKENS]
+    )
     agent, ctx = make(conn, broker, client)
     assert agent.run(ctx).action == "no_action"  # exactly at the budget is allowed
+
+
+def test_tight_headroom_aborts_to_no_action_before_the_api_call(conn, broker) -> None:
+    client = FakeAnthropic(
+        [text_response("should not run")], token_counts=[MAX_PROMPT_TOKENS - 1]
+    )
+    agent, ctx = make(conn, broker, client)
+    result = agent.run(ctx)
+    assert result.action == "no_action"
+    assert result.stop_reason == "budget_headroom"
+    assert client.requests == []
 
 
 def test_the_count_is_of_the_real_assembled_prompt(conn, broker) -> None:
@@ -539,7 +554,7 @@ def test_the_count_is_of_the_real_assembled_prompt(conn, broker) -> None:
 def test_peak_prompt_tokens_are_logged_for_every_cycle(conn, broker) -> None:
     client = FakeAnthropic(
         [tool_response(("get_risk_limits", {})), text_response("done")],
-        token_counts=[400, 900],
+        token_counts=[400, 400, 900],
     )
     agent, ctx = make(conn, broker, client)
     logged = json.loads(agent.run(ctx).full_prompt)

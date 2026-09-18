@@ -19,6 +19,7 @@ from typing import Any
 import anthropic
 
 from trader.agent import AgentResult
+from trader.alerts import AlertSink
 from trader.broker import Broker
 from trader.constants import ANTHROPIC_MODEL, MAX_PROMPT_TOKENS
 from trader.execution import ExecutionResult
@@ -51,6 +52,11 @@ MAX_TOOL_RESULT_CHARS = 1_500
 #: worst-case state block inside MAX_PROMPT_TOKENS.
 MAX_TOTAL_TOOL_RESULT_CHARS = 4_000
 
+#: Tokens reserved for tool results and thinking before the loop starts. If the
+#: first assembled prompt is already inside this band, abort to no_action
+#: rather than dying mid-playbook with ContextBudgetExceeded.
+HEADROOM_RESERVE_TOKENS = 2_000
+
 
 class ContextBudgetExceeded(RuntimeError):
     """The assembled prompt would exceed MAX_PROMPT_TOKENS.
@@ -80,6 +86,7 @@ class AnthropicAgent:
         thinking: bool = True,
         effort: str = "medium",
         client: Any | None = None,
+        alert_sink: AlertSink | None = None,
     ) -> None:
         self.conn = conn
         self.broker = broker
@@ -91,6 +98,7 @@ class AnthropicAgent:
         self.thinking = thinking
         self.effort = effort
         self.client = client or anthropic.Anthropic(api_key=api_key)
+        self.alert_sink = alert_sink
 
     # --- budget ------------------------------------------------------------
 
@@ -112,6 +120,28 @@ class AnthropicAgent:
             )
         log.debug("context_budget", extra={"tokens": tokens, "at": label})
         return tokens
+
+    def _check_headroom(self, system: str, messages: list[dict[str, Any]]) -> bool:
+        """False when the first prompt is already too close to the hard ceiling."""
+        try:
+            counted = self.client.messages.count_tokens(
+                model=self.model, system=system, messages=messages, tools=TOOL_SCHEMAS
+            )
+            tokens = int(counted.input_tokens)
+        except (anthropic.APIError, OSError, TypeError, ValueError, AttributeError):
+            return True
+        threshold = self.max_prompt_tokens - HEADROOM_RESERVE_TOKENS
+        if tokens >= threshold:
+            log.warning(
+                "budget_headroom_abort",
+                extra={
+                    "tokens": tokens,
+                    "threshold": threshold,
+                    "budget": self.max_prompt_tokens,
+                },
+            )
+            return False
+        return True
 
     # --- request -----------------------------------------------------------
 
@@ -136,7 +166,30 @@ class AnthropicAgent:
         user_turn = render("cycle_user", self.prompt_dir, state=render_state(ctx))
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_turn}]
 
-        tc = ToolContext(conn=self.conn, broker=self.broker, ctx=ctx, config=self.config)
+        if not self._check_headroom(system, messages):
+            return AgentResult(
+                action="no_action",
+                reasoning=(
+                    "Budget headroom insufficient for the mandated workflow. "
+                    "Aborting to no_action rather than failing mid-cycle."
+                ),
+                model=self.model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                full_prompt="(aborted before API call due to budget headroom)",
+                full_response="(aborted)",
+                tool_calls=[],
+                executions=[],
+                stop_reason="budget_headroom",
+            )
+
+        tc = ToolContext(
+            conn=self.conn,
+            broker=self.broker,
+            ctx=ctx,
+            config=self.config,
+            alert_sink=self.alert_sink,
+        )
         tool_calls: list[dict[str, Any]] = []
         tool_result_chars = 0
         prompt_tokens = completion_tokens = 0

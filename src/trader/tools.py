@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from trader.alerts import AlertSink
 from trader.broker import BAR_TIMEFRAMES, MAX_BARS, Broker, BrokerError
 from trader.constants import MAX_THESIS_RATIONALE_CHARS
 from trader.execution import build_proposal, place_order
@@ -49,6 +50,7 @@ class ToolContext:
     #: the tool loop; the risk layer separately caps *submitted* orders.
     orders_attempted: int = 0
     executions: list[Any] = None  # type: ignore[assignment]
+    alert_sink: AlertSink | None = None
 
     def __post_init__(self) -> None:
         if self.executions is None:
@@ -188,7 +190,9 @@ def _place_order(tc: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     prior = tc.ctx.position_for(proposal.symbol)
     prior_qty = float(prior["qty"]) if prior else 0.0
 
-    result = place_order(tc.conn, tc.broker, tc.ctx, proposal, tc.config)
+    result = place_order(
+        tc.conn, tc.broker, tc.ctx, proposal, tc.config, alert_sink=tc.alert_sink
+    )
     tc.executions.append(result)
 
     if result.executed:

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from trader.backtest import (
+    BacktestError,
     BacktestReport,
     Trade,
     _compute_orb,
@@ -193,7 +194,7 @@ def test_simulate_trade_long_target_hit() -> None:
     assert trade.target_price == 102.7  # Entry + 1.5 * range
     assert trade.exit_reason == "target"
     assert trade.exit_price == 102.7
-    assert trade.r_multiple == pytest.approx(1.5 / 0.7 * 0.7, abs=0.1)  # ~1.5R
+    assert trade.r_multiple == pytest.approx(1.5 / 0.7, abs=0.1)
 
 
 def test_simulate_trade_long_stopped() -> None:
@@ -367,4 +368,37 @@ def test_format_backtest_human_readable() -> None:
     assert "Win rate:" in output
     assert "By Regime:" in output
     assert "By Entry Hour" in output
-    assert "first-evidence pass" in output
+
+
+def test_live_backtest_without_a_broker_fails_closed() -> None:
+    with pytest.raises(BacktestError, match="requires a broker"):
+        backtest_orb(["SPY"], "2026-09-17", "2026-09-18", stub=False)
+
+
+def test_live_backtest_fetches_bars_from_the_broker() -> None:
+    from tests.fakes import FakeBroker
+    from trader.backtest import _load_fixture
+
+    fixture = _load_fixture()
+    broker = FakeBroker(
+        historical_bars={
+            "SPY": list(fixture["SPY"][0]["bars_5min"]),
+            "QQQ": list(fixture["QQQ"][0]["bars_5min"]),
+        }
+    )
+    report = backtest_orb(["SPY"], "2026-09-17", "2026-09-17", broker=broker)
+    assert report.stub_mode is False
+    assert report.total_trades == 1
+    assert report.trades[0].symbol == "SPY"
+    assert report.trades[0].direction == "long"
+    assert "get_bars_between" in broker.calls
+
+
+def test_live_backtest_skips_days_when_the_broker_has_no_bars() -> None:
+    from tests.fakes import FakeBroker
+
+    report = backtest_orb(
+        ["SPY"], "2026-09-17", "2026-09-17", broker=FakeBroker(historical_bars={})
+    )
+    assert report.total_trades == 0
+    assert report.skipped_days == 1

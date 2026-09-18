@@ -28,6 +28,8 @@ class FakeBroker:
     open_orders: list[dict[str, Any]] = field(default_factory=list)
     #: Per-symbol overrides for get_scan_data; anything absent is synthesized.
     scan_data: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Per-symbol historical bars for get_bars_between (backtests).
+    historical_bars: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     #: Optional get_order overrides, including nested bracket legs for tests.
     order_fills: dict[str, OrderFill] = field(default_factory=dict)
     #: Exchange-local (hour, minute) the clock reports. Fixed mid-morning by
@@ -89,6 +91,22 @@ class FakeBroker:
             }
             for i in range(min(limit, 30))
         ]
+
+    def get_bars_between(
+        self,
+        symbol: str,
+        *,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        self._check("get_bars_between")
+        out: list[dict[str, Any]] = []
+        for bar in self.historical_bars.get(symbol.upper(), []):
+            stamp = datetime.fromisoformat(str(bar["t"]))
+            if start <= stamp < end:
+                out.append(dict(bar))
+        return out
 
     def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Synthesized scan payloads: flat 5-minute bars from today's open."""

@@ -23,7 +23,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_db_only_commands_need_no_credentials(env, monkeypatch, capsys) -> None:
     for var in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    for command in (["status"], ["cycles"], ["rejections"], ["kill", "status"]):
+    for command in (["status"], ["cycles"], ["rejections"], ["kill", "status"], ["alerts"]):
         assert main([*command]) == 0
     capsys.readouterr()
 
@@ -79,10 +79,31 @@ def test_the_parser_exposes_the_documented_commands() -> None:
         "rejections",
         "reconcile",
         "evaluate",
+        "critique",
         "kill",
         "dashboard",
         "rh-login",
+        "alerts",
+        "replay",
+        "promote",
+        "backtest",
     }
+
+
+def test_stub_backtest_needs_no_credentials(env, monkeypatch, capsys) -> None:
+    for var in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    assert main(["backtest", "--stub", "--start", "2026-09-17", "--end", "2026-09-18"]) == 0
+    out = capsys.readouterr().out
+    assert "ORB Historical Backtest" in out
+    assert "Total trades:" in out
+
+
+def test_alerts_command_needs_no_credentials(env, monkeypatch, capsys) -> None:
+    for var in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    assert main(["alerts"]) == 0
+    assert capsys.readouterr().out.strip() == "(none)"
 
 
 def test_unknown_broker_mode_is_fatal(env, monkeypatch, capsys) -> None:

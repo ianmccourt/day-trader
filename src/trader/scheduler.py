@@ -19,6 +19,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from trader.agent import Agent
+from trader.alerts import AlertSink
 from trader.broker import Broker
 from trader.constants import MARKET_TZ, RTH_CLOSE, RTH_OPEN
 from trader.cycle import CycleOutcome, run_cycle
@@ -52,6 +53,7 @@ def run_scheduler(
     cycle_minutes: int,
     risk_config: RiskConfig,
     on_cycle: Callable[[CycleOutcome], None] | None = None,
+    alert_sink: AlertSink | None = None,
 ) -> None:
     orphans = reconcile_orphan_cycles(conn)
     if orphans:
@@ -69,7 +71,9 @@ def run_scheduler(
     )
 
     def job() -> None:
-        outcome = run_cycle(conn, broker, agent, risk_config=risk_config)
+        outcome = run_cycle(
+            conn, broker, agent, risk_config=risk_config, alert_sink=alert_sink
+        )
         if on_cycle:
             on_cycle(outcome)
 

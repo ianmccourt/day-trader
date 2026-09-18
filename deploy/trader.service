@@ -1,0 +1,19 @@
+[Unit]
+Description=day-trader paper trading harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/day-trader
+EnvironmentFile=/home/trader/day-trader/.env
+ExecStart=/home/trader/day-trader/.venv/bin/python -m trader.cli run
+Restart=always
+RestartSec=10s
+StandardOutput=append:/home/trader/day-trader/logs/trader.jsonl
+StandardError=append:/home/trader/day-trader/logs/trader.jsonl
+
+[Install]
+WantedBy=multi-user.target

@@ -11,10 +11,18 @@ from typing import Any
 
 from trader import logging_setup
 from trader.agent import Agent, StubAgent
+from trader.alerts import AlertSink, get_recent_alerts
 from trader.backtest import BacktestError, backtest_orb, format_backtest, save_backtest
 from trader.broker import AlpacaBroker, Broker, BrokerError
 from trader.brokers import broker_endpoint, make_broker
 from trader.config import MissingCredential, Settings, load_settings
+from trader.critique import (
+    CritiqueError,
+    format_critique,
+    generate_critique,
+    generate_diff,
+    save_critique,
+)
 from trader.cycle import run_cycle
 from trader.db import (
     KILL_SWITCH,
@@ -26,13 +34,6 @@ from trader.db import (
     reconcile_orphan_cycles,
     set_flag,
     utcnow,
-)
-from trader.critique import (
-    CritiqueError,
-    format_critique,
-    generate_critique,
-    generate_diff,
-    save_critique,
 )
 from trader.evaluate import EvaluationError, evaluate, format_report
 from trader.execution import reconcile_fills
@@ -53,6 +54,7 @@ from trader.risk.config import (
     load_risk_config,
 )
 from trader.scheduler import run_scheduler
+from trader.startup import StartupCheckError, run_startup_checks
 from trader.state import trading_day_for
 
 
@@ -64,7 +66,7 @@ def _open(settings: Settings) -> tuple[sqlite3.Connection, Broker]:
 
 def _agent(
     settings: Settings, args: argparse.Namespace, conn: sqlite3.Connection,
-    broker: Broker, config: RiskConfig
+    broker: Broker, config: RiskConfig, *, alert_sink: AlertSink | None = None
 ) -> Agent:
     """The Phase 1 stub, or the real model. Both satisfy the same protocol."""
     if args.stub:
@@ -76,7 +78,12 @@ def _agent(
         api_key=settings.anthropic_api_key,
         thinking=not args.no_thinking,
         effort=args.effort,
+        alert_sink=alert_sink,
     )
+
+
+def _alert_sink(args: argparse.Namespace) -> AlertSink | None:
+    return None if getattr(args, "no_alerts", False) else AlertSink()
 
 
 def _risk(args: argparse.Namespace) -> RiskConfig:
@@ -86,13 +93,19 @@ def _risk(args: argparse.Namespace) -> RiskConfig:
 
 def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     config = _risk(args)
+    checks = run_startup_checks(strict=args.strict)
+    for ok, msg in checks:
+        if not ok:
+            print(f"WARNING: {msg}", file=sys.stderr)
     conn, broker = _open(settings)
+    alert_sink = _alert_sink(args)
     run_scheduler(
         conn,
         broker,
-        _agent(settings, args, conn, broker, config),
+        _agent(settings, args, conn, broker, config, alert_sink=alert_sink),
         cycle_minutes=settings.cycle_minutes,
         risk_config=config,
+        alert_sink=alert_sink,
     )
     return 0
 
@@ -101,9 +114,10 @@ def cmd_cycle(settings: Settings, args: argparse.Namespace) -> int:
     config = _risk(args)
     conn, broker = _open(settings)
     reconcile_orphan_cycles(conn)
+    alert_sink = _alert_sink(args)
     outcome = run_cycle(
-        conn, broker, _agent(settings, args, conn, broker, config),
-        risk_config=config, force=args.force
+        conn, broker, _agent(settings, args, conn, broker, config, alert_sink=alert_sink),
+        risk_config=config, force=args.force, alert_sink=alert_sink
     )
     summary: dict[str, Any] = {
         "cycle_id": outcome.cycle_id,
@@ -338,6 +352,10 @@ def cmd_kill(settings: Settings, args: argparse.Namespace) -> int:
         print("ENGAGED" if kill_switch_engaged(conn) else "off")
         return 0
     set_flag(conn, KILL_SWITCH, "1" if args.state == "on" else "0", note=args.note)
+    if args.state == "on":
+        sink = _alert_sink(args)
+        if sink is not None:
+            sink.alert_kill_switch_engaged(note=args.note)
     print(f"kill_switch -> {'ENGAGED' if args.state == 'on' else 'off'}")
     return 0
 
@@ -401,6 +419,68 @@ def cmd_promote(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_alerts(settings: Settings, args: argparse.Namespace) -> int:
+    """Show recent operational alerts. DB-only; no broker call."""
+    alerts = get_recent_alerts(limit=args.limit)
+    if args.json:
+        print(json.dumps(alerts, indent=2, default=str))
+        return 0
+    if not alerts:
+        print("(none)")
+        return 0
+    print(f"Recent alerts (last {len(alerts)}):")
+    for alert in alerts:
+        details = alert.get("details") or {}
+        extra = "".join(f" {key}={value}" for key, value in details.items())
+        print(
+            f"  [{alert.get('timestamp')}] {str(alert.get('severity', 'info')).upper()}: "
+            f"{alert.get('event')}{extra}"
+        )
+    return 0
+
+
+def cmd_backtest(settings: Settings, args: argparse.Namespace) -> int:
+    """ORB historical backtest. `--stub` uses fixtures; otherwise Alpaca bars."""
+    symbols = [
+        part.strip().upper()
+        for part in (args.symbols or "SPY,QQQ").split(",")
+        if part.strip()
+    ]
+    if not symbols:
+        print("error: --symbols is empty", file=sys.stderr)
+        return 2
+    stub = bool(args.stub)
+    start = args.start
+    end = args.end
+    if stub:
+        start = start or "2026-09-17"
+        end = end or "2026-09-18"
+    elif not start or not end:
+        print(
+            "error: --start and --end are required for a live backtest "
+            "(or pass --stub for fixture data)",
+            file=sys.stderr,
+        )
+        return 2
+    broker: Broker | None = None
+    if not stub:
+        if not settings.alpaca_api_key or not settings.alpaca_secret_key:
+            print(
+                "error: Alpaca keys required for a live backtest. Use --stub.",
+                file=sys.stderr,
+            )
+            return 2
+        broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key)
+    report = backtest_orb(symbols, start, end, broker=broker, stub=stub)
+    path = save_backtest(report)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+    else:
+        print(format_backtest(report))
+        print(f"\nreport saved: {path}")
+    return 0
+
+
 def cmd_rh_login(settings: Settings, _args: argparse.Namespace) -> int:
     """Interactive OAuth. `trader run` cannot complete a browser login."""
     from trader.robinhood_mcp import interactive_login
@@ -454,6 +534,12 @@ def cmd_dashboard(settings: Settings, args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trader", description=__doc__)
     p.add_argument("--text-logs", action="store_true", help="human-readable logs, not JSON lines")
+    p.add_argument(
+        "--strict", action="store_true", help="fail startup checks rather than warning"
+    )
+    p.add_argument(
+        "--no-alerts", action="store_true", help="disable file/webhook alerting"
+    )
     p.add_argument(
         "--stub", action="store_true", help="use the Phase 1 stub agent instead of the model"
     )
@@ -549,6 +635,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="authorize the Robinhood Agentic MCP adapter (opens a browser)",
     ).set_defaults(func=cmd_rh_login)
 
+    alerts_parser = sub.add_parser("alerts", help="show recent operational alerts")
+    alerts_parser.add_argument("--limit", type=int, default=20, help="max alerts to show")
+    alerts_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    alerts_parser.set_defaults(func=cmd_alerts)
+
     rep = sub.add_parser(
         "replay",
         help="offline replay: run a candidate playbook against historical contexts (Strategy RSI)",
@@ -635,6 +726,12 @@ def main(argv: list[str] | None = None) -> int:
     except BacktestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except ReplayError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except StartupCheckError as exc:
+        print(f"error: startup check failed: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

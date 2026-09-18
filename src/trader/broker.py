@@ -197,6 +197,14 @@ class Broker(Protocol):
     def get_positions(self) -> list[dict[str, Any]]: ...
     def get_latest_price(self, symbol: str) -> float: ...
     def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]: ...
+    def get_bars_between(
+        self,
+        symbol: str,
+        *,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]: ...
     def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]: ...
     def get_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]: ...
     def cancel_open_orders(self, symbol: str) -> int: ...
@@ -411,6 +419,52 @@ class AlpacaBroker:
                 "v": float(bar.volume),
             }
             for bar in bars.data.get(symbol, [])[-limit:]
+        ]
+
+    def get_bars_between(
+        self,
+        symbol: str,
+        *,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        """Historical OHLCV between `start` and `end`. Not capped by MAX_BARS.
+
+        The agent tool path stays on `get_bars` (newest N). Backtests need a
+        full RTH session of 5-minute bars, which is more than the prompt cap.
+        """
+        spec = BAR_TIMEFRAMES.get(timeframe)
+        if spec is None:
+            raise BrokerError(
+                f"unsupported timeframe {timeframe!r}; "
+                f"expected one of {', '.join(sorted(BAR_TIMEFRAMES))}"
+            )
+        unit, _span = spec
+        if end <= start:
+            raise BrokerError(f"get_bars_between end {end} is not after start {start}")
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=unit,
+                start=start.astimezone(UTC),
+                end=end.astimezone(UTC),
+            )
+            bars = self._data.get_stock_bars(request)
+        except Exception as exc:
+            raise BrokerError(
+                f"get_bars_between({symbol}, {timeframe}) failed: {exc}"
+            ) from exc
+        return [
+            {
+                "t": bar.timestamp.isoformat(),
+                "o": float(bar.open),
+                "h": float(bar.high),
+                "l": float(bar.low),
+                "c": float(bar.close),
+                "v": float(bar.volume),
+            }
+            for bar in bars.data.get(symbol, [])
         ]
 
     def get_scan_data(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]:

@@ -53,7 +53,7 @@ def test_place_order_evaluates_before_submitting() -> None:
 
 def test_place_order_has_no_skip_argument() -> None:
     params = set(inspect.signature(execution.place_order).parameters)
-    assert params == {"conn", "broker", "ctx", "proposal", "config"}
+    assert params == {"conn", "broker", "ctx", "proposal", "config", "alert_sink"}
     forbidden = {"skip", "force", "bypass", "dry_run", "override", "no_risk"}
     assert not any(any(f in p for f in forbidden) for p in params)
 

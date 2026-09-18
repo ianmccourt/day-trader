@@ -745,6 +745,18 @@ class RobinhoodMcpBroker:
     def get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]:
         return self._run(self._get_bars(symbol, timeframe=timeframe, limit=limit))
 
+    def get_bars_between(
+        self,
+        symbol: str,
+        *,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        raise BrokerError(
+            "historical bar ranges are not supported by the Robinhood MCP adapter"
+        )
+
     async def _get_bars(self, symbol: str, *, timeframe: str, limit: int) -> list[dict[str, Any]]:
         async with self._session() as session:
             caps = await self._caps_for(session)

@@ -8,7 +8,7 @@ Rules matched to playbook:
 - Opening range: 09:30-09:45 ET (first three 5-minute bars)
 - Entry: first 5-minute close outside range (above for long, below for short)
 - Stop: range midpoint
-- Target: 1.5× range height beyond entry
+- Target: 1.5x range height beyond entry
 - Regime filter: QQQ regime (up/down/chop) from scanner logic
 - Time windows: 09:45-12:30 primary, 12:30-14:30 VWAP continuation only
 
@@ -18,7 +18,6 @@ Honest about look-ahead: uses closed bars only.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -50,7 +49,7 @@ RTH_CLOSE = time(16, 0)
 MIN_RANGE_HEIGHT_PCT = 0.15
 MAX_RANGE_HEIGHT_PCT = 1.5
 
-#: R:R ratio (target = entry + R × range_height, stop = range_midpoint)
+#: R:R ratio (target = entry + R * range_height, stop = range_midpoint)
 REWARD_RISK_RATIO = 1.5
 
 #: Default backtest output directory
@@ -366,6 +365,60 @@ def _simulate_trade(
     )
 
 
+def _parse_day(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=MARKET_TZ)
+    except ValueError as exc:
+        raise BacktestError(f"invalid date {value!r}; expected YYYY-MM-DD") from exc
+
+
+def _session_bounds(date_str: str) -> tuple[datetime, datetime]:
+    day = _parse_day(date_str)
+    start = day.replace(hour=9, minute=30, second=0, microsecond=0)
+    end = day.replace(hour=16, minute=0, second=0, microsecond=0)
+    return start, end
+
+
+def _trade_for_day(
+    symbol: str,
+    date_str: str,
+    bars_5min: list[dict[str, Any]],
+    regime: str | None,
+) -> Trade | None:
+    """One symbol, one day, at most one regime-aligned ORB."""
+    setup = _compute_orb(bars_5min)
+    if setup is None:
+        return None
+    setup = ORBSetup(
+        symbol=symbol,
+        date=date_str,
+        or_high=setup.or_high,
+        or_low=setup.or_low,
+        or_midpoint=setup.or_midpoint,
+        range_height=setup.range_height,
+        range_height_pct=setup.range_height_pct,
+        regime=regime,
+    )
+    if regime == "up":
+        directions = ("long",)
+    elif regime == "down":
+        directions = ("short",)
+    else:
+        # chop / unknown: sit out. The live playbook is softer on chop; a
+        # mechanical first-evidence backtest does not guess.
+        return None
+    for direction in directions:
+        entry_bar = _find_entry_bar(bars_5min, setup, direction)
+        if entry_bar is not None:
+            return _simulate_trade(setup, entry_bar, bars_5min, direction)
+    return None
+
+
+def _fetch_session_bars(broker: Broker, symbol: str, date_str: str) -> list[dict[str, Any]]:
+    start, end = _session_bounds(date_str)
+    return broker.get_bars_between(symbol, timeframe="5Min", start=start, end=end)
+
+
 def backtest_orb(
     symbols: list[str],
     start_date: str,
@@ -374,82 +427,54 @@ def backtest_orb(
     broker: Broker | None = None,
     stub: bool = False,
 ) -> BacktestReport:
+    """Run the ORB playbook over a date range.
+
+    `--stub` (or stub=True) uses checked-in fixtures. Anything else requires a
+    broker that can fetch historical 5-minute bars; missing data fails closed
+    rather than silently replaying the fixtures.
     """
-    Run ORB backtest over date range.
-    
-    Args:
-        symbols: List of symbols to backtest (e.g. ["SPY", "QQQ"])
-        start_date: First trading day (YYYY-MM-DD)
-        end_date: Last trading day (YYYY-MM-DD)
-        broker: Broker for historical data (None for stub mode)
-        stub: Force stub mode with fixture data
-    
-    Returns:
-        BacktestReport with trades and metrics
-    """
-    if stub or broker is None:
+    if start_date > end_date:
+        raise BacktestError(f"start {start_date} is after end {end_date}")
+    _parse_day(start_date)
+    _parse_day(end_date)
+    if stub:
         return _backtest_stub(symbols, start_date, end_date)
-    
+    if broker is None:
+        raise BacktestError(
+            "live backtest requires a broker; pass --stub for fixture data"
+        )
+
     report = BacktestReport(
         symbols=symbols,
         start_date=start_date,
         end_date=end_date,
         stub_mode=False,
     )
-    
-    # Iterate trading days (simplified: actual impl would use a trading calendar)
-    current = datetime.fromisoformat(start_date)
-    end = datetime.fromisoformat(end_date)
-    
-    while current <= end:
+    current = _parse_day(start_date)
+    last = _parse_day(end_date)
+    while current <= last:
+        if current.weekday() >= 5:
+            current += timedelta(days=1)
+            continue
         date_str = current.strftime("%Y-%m-%d")
-        
-        # Fetch 5-minute bars for all symbols for this day
-        # (Real impl would use broker.get_bars with proper parameters)
         try:
+            session_end = _session_bounds(date_str)[1]
+            needed = list(dict.fromkeys([*symbols, "QQQ"]))
+            by_symbol: dict[str, list[dict[str, Any]]] = {}
+            for symbol in needed:
+                by_symbol[symbol] = _fetch_session_bars(broker, symbol, date_str)
+            if not any(by_symbol.values()):
+                report.skipped_days += 1
+                current += timedelta(days=1)
+                continue
+            regime = classify_regime(by_symbol.get("QQQ") or [], now=session_end)
             for symbol in symbols:
-                # Placeholder: real implementation would fetch bars
-                # bars = broker.get_bars(symbol, timeframe="5Min", start=date_str, end=date_str)
-                bars_5min: list[dict[str, Any]] = []
-                
-                if not bars_5min:
-                    continue
-                
-                # Compute ORB setup
-                setup = _compute_orb(bars_5min)
-                if not setup:
-                    continue
-                
-                # Add regime from QQQ (simplified: would fetch QQQ bars)
-                setup = ORBSetup(
-                    symbol=symbol,
-                    date=date_str,
-                    or_high=setup.or_high,
-                    or_low=setup.or_low,
-                    or_midpoint=setup.or_midpoint,
-                    range_height=setup.range_height,
-                    range_height_pct=setup.range_height_pct,
-                    regime=None,  # Would compute from QQQ bars
-                )
-                
-                # Try long breakout
-                entry_bar = _find_entry_bar(bars_5min, setup, "long")
-                if entry_bar:
-                    trade = _simulate_trade(setup, entry_bar, bars_5min, "long")
+                trade = _trade_for_day(symbol, date_str, by_symbol.get(symbol) or [], regime)
+                if trade is not None:
                     report.trades.append(trade)
-                    continue  # One trade per symbol per day
-                
-                # Try short breakout
-                entry_bar = _find_entry_bar(bars_5min, setup, "short")
-                if entry_bar:
-                    trade = _simulate_trade(setup, entry_bar, bars_5min, "short")
-                    report.trades.append(trade)
-        
         except BrokerError:
             report.skipped_days += 1
-        
         current += timedelta(days=1)
-    
     return report
 
 
@@ -474,36 +499,13 @@ def _backtest_stub(symbols: list[str], start_date: str, end_date: str) -> Backte
             if not (start_date <= day_data["date"] <= end_date):
                 continue
             
-            bars_5min = day_data["bars_5min"]
-            regime = day_data.get("regime")
-            
-            # Compute ORB setup
-            setup = _compute_orb(bars_5min)
-            if not setup:
-                continue
-            
-            setup = ORBSetup(
-                symbol=symbol,
-                date=day_data["date"],
-                or_high=setup.or_high,
-                or_low=setup.or_low,
-                or_midpoint=setup.or_midpoint,
-                range_height=setup.range_height,
-                range_height_pct=setup.range_height_pct,
-                regime=regime,
+            trade = _trade_for_day(
+                symbol,
+                day_data["date"],
+                day_data["bars_5min"],
+                day_data.get("regime"),
             )
-            
-            # Try long breakout
-            entry_bar = _find_entry_bar(bars_5min, setup, "long")
-            if entry_bar:
-                trade = _simulate_trade(setup, entry_bar, bars_5min, "long")
-                report.trades.append(trade)
-                continue
-            
-            # Try short breakout
-            entry_bar = _find_entry_bar(bars_5min, setup, "short")
-            if entry_bar:
-                trade = _simulate_trade(setup, entry_bar, bars_5min, "short")
+            if trade is not None:
                 report.trades.append(trade)
     
     return report

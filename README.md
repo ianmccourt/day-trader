@@ -40,6 +40,8 @@ uv run trader rejections           # risk rejections, by check and most recent
 uv run trader reconcile            # read submitted orders back from the broker
 uv run trader evaluate --start ... --end ...   # did it beat doing nothing?
 uv run trader kill on|off|status   # kill switch (persisted in the DB)
+uv run trader alerts               # recent operational alerts (file + optional webhook)
+uv run trader backtest --start ... --end ... [--stub]
 uv run trader dashboard            # local browser panel (start/stop/monitor)
 uv run trader rh-login             # authorize Robinhood Agentic (browser OAuth)
 uv run trader --text-logs ...      # human-readable logs instead of JSON lines
