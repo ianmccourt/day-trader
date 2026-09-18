@@ -676,3 +676,89 @@ Against the live paper account: single cycles (reads, tool loop, budget), one
 1-share SPY order end to end through the risk layer to a confirmed fill,
 reconciliation, and evaluation. **A full unattended session has not been run
 yet** — that is the obvious next step, and `trader run` is what does it.
+
+
+## Strategy RSI: Offline Replay and Promotion
+
+Given a date window of paper history, the system can:
+1. Produce or accept a **candidate playbook** (alternative system prompt)
+2. **Offline replay** that candidate against frozen cycle contexts from the journal
+3. Score it vs actual decisions (order counts, symbol changes, budget usage)
+4. Leave promotion to a human — never auto-edit `risk.toml`, never auto-apply to live `prompts/`, never touch `submit_order`
+
+### Workflow
+
+```bash
+# 1. Create or receive a candidate playbook
+vim prompts/candidates/my_experiment.txt
+
+# 2. Replay it against historical contexts (no broker calls)
+uv run trader replay --prompt prompts/candidates/my_experiment.txt \
+  --start 2026-09-14 --end 2026-09-18
+
+# Output:
+# replay report saved: data/replays/replay_2026-09-14_2026-09-18_abc12345.json
+#
+# Replay Report: prompts/candidates/my_experiment.txt
+# Window: 2026-09-14 to 2026-09-18
+# Candidate SHA256: abc123...
+#
+# ## Summary
+# Cycles total: 120
+# Cycles changed: 15 (12.5%)
+# Orders added (replay would place, actual did not): 3
+# Orders removed (actual placed, replay would not): 8
+#
+# ## Symbols
+# Novel (replay would trade, actual didn't): QQQ, XLF
+# Avoided (actual traded, replay wouldn't): NVDA
+
+# 3. Review the report and decide
+
+# 4a. If good, promote (dry-run first)
+uv run trader promote --candidate prompts/candidates/my_experiment.txt --dry-run
+
+# 4b. Actually promote
+uv run trader promote --candidate prompts/candidates/my_experiment.txt
+
+# 5. Restart the loop for the change to take effect
+# (prompts/ is loaded once per process, cached)
+```
+
+### Scoring
+
+Replay compares the candidate's decisions against actual decisions:
+- **Orders added**: replay would place, actual did not
+- **Orders removed**: actual placed, replay would not
+- **Symbols novel**: replay would trade, actual didn't
+- **Symbols avoided**: actual traded, replay wouldn't
+- **Budget notes**: flags cycles where the candidate would exceed `MAX_PROMPT_TOKENS`
+
+Replay does **not** fake fills or compute hypothetical P&L — it scores decision deltas only.
+Use `trader evaluate` on the actual history to judge performance; use replay to judge strategy changes.
+
+### Safety
+
+- **No broker submit**: replay never calls `submit_order`, only loads frozen contexts
+- **Promotion allowlist**: only `prompts/system.txt` and `prompts/cycle_user.txt` can be targeted
+- **Dry-run default**: `trader promote` requires manual confirmation (shows diff, does not apply)
+- **Human gate**: promotion copies the candidate file; operator reviews diff, applies, restarts loop
+
+### What This Does NOT Do
+
+- ❌ **No fake fills**: replay does not compute hypothetical P&L (use actual history for that)
+- ❌ **No risk.toml edits**: risk layer is operator-controlled, not model-controlled
+- ❌ **No auto-promotion**: diffs are shown, never applied without confirmation
+- ❌ **No mid-run rewrite**: prompts cached at process start; restart required
+- ❌ **No tool/domain RSI yet**: this is strategy (playbook) RSI only
+
+### Stub Mode
+
+Like other commands, replay supports `--stub` for testing without an API key:
+
+```bash
+uv run trader replay --prompt prompts/candidates/test.txt \
+  --start 2026-09-14 --end 2026-09-18 --stub
+```
+
+Returns stub decisions (`no_action` always) with no API call.
