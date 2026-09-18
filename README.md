@@ -127,91 +127,6 @@ real ceiling.
 
 ## Running and monitoring
 
-### Running Unattended
-
-For unattended multi-day operation, use a supervisor to restart on exit:
-
-**systemd (Linux):**
-```bash
-# Copy and edit the unit file
-sudo cp deploy/trader.service /etc/systemd/system/
-sudo nano /etc/systemd/system/trader.service  # adjust paths and user
-
-# Enable and start
-sudo systemctl enable trader.service
-sudo systemctl start trader.service
-
-# Check status and logs
-sudo systemctl status trader.service
-sudo journalctl -u trader.service -f
-```
-
-**launchd (macOS):**
-```bash
-# Copy and edit the plist
-cp deploy/com.daytrader.plist ~/Library/LaunchAgents/
-nano ~/Library/LaunchAgents/com.daytrader.plist  # adjust paths
-
-# Load and start
-launchctl load ~/Library/LaunchAgents/com.daytrader.plist
-launchctl start com.daytrader.harness
-
-# Check status
-launchctl list | grep daytrader
-tail -f logs/trader.jsonl
-```
-
-**Manual watchdog (fallback):**
-```bash
-# scripts/watchdog.sh checks heartbeat and restarts if stale
-# Cron this every 5 minutes:
-*/5 * * * * /path/to/day-trader/scripts/watchdog.sh >> /tmp/watchdog.log 2>&1
-```
-
-### Alerting
-
-Alerts are written to `data/alerts.jsonl` and optionally POSTed to a webhook:
-
-```bash
-# Set webhook in .env (Slack, Discord, etc.)
-TRADER_ALERT_WEBHOOK=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
-
-# Check recent alerts
-uv run trader alerts
-uv run trader alerts --limit 50 --json
-```
-
-Alerts fire on:
-- **Consecutive error cycles** (3+ in a row)
-- **Kill switch engaged**
-- **Max daily loss latched**
-- **Heartbeat stale** (if watchdog enabled)
-
-Alerts never block the harness — webhook failures are logged and ignored.
-
-### Log Rotation
-
-Logs grow unbounded without rotation. Install the logrotate config:
-
-```bash
-sudo cp deploy/logrotate-trader.conf /etc/logrotate.d/trader
-sudo chown root:root /etc/logrotate.d/trader
-sudo chmod 644 /etc/logrotate.d/trader
-
-# Test rotation
-sudo logrotate -f /etc/logrotate.d/trader
-```
-
-Startup checks warn if logs exceed 500 MB or free disk is below 1 GB:
-
-```bash
-# Warnings only (default)
-uv run trader run
-
-# Fail instead of warning
-uv run trader run --strict
-```
-
 ### Control panel
 
 A local browser UI starts, stops, and monitors the loop. It binds to loopback
@@ -847,3 +762,64 @@ uv run trader replay --prompt prompts/candidates/test.txt \
 ```
 
 Returns stub decisions (`no_action` always) with no API call.
+
+## ORB Historical Backtest
+
+Prove or falsify the discretionary ORB (Opening Range Breakout) playbook
+parameters with a historical backtest over liquid names. First-evidence pass:
+win rate, avg R, regime-conditional stats, time-of-day sensitivity.
+
+```bash
+# Stub mode with fixture data (always works, no broker keys)
+uv run trader backtest --stub
+
+# With date range and symbols
+uv run trader backtest --start 2026-09-01 --end 2026-09-30 --symbols SPY,QQQ,NVDA --stub
+
+# Live mode with Alpaca historical bars (requires ALPACA_API_KEY)
+uv run trader backtest --start 2026-09-01 --end 2026-09-30 --symbols SPY,QQQ
+
+# Machine-readable output
+uv run trader backtest --start 2026-09-01 --end 2026-09-30 --stub --json
+```
+
+### What It Does
+
+Implements ORB rules from `prompts/system.txt` in code:
+- **Opening range**: 09:30-09:45 ET (first three 5-minute bars)
+- **Entry**: first 5-minute close outside range (above for long, below for short)
+- **Stop**: range midpoint
+- **Target**: 1.5× range height beyond entry (1.5:1 R:R)
+- **Regime filter**: QQQ regime (up/down/chop) from scanner logic
+- **Time windows**: 09:45-12:30 primary, 12:30-14:30 VWAP continuation only
+- Uses **closed bars only** (honest about look-ahead)
+
+### Metrics
+
+- Total trades, winners, losers, win rate
+- Avg R, total R
+- By regime (up/down/chop): trades, win rate, avg R, total R
+- By entry hour (ET): trades, win rate, avg R
+- Sample trades with entry/exit details
+
+### Data Sources
+
+- **Stub mode** (`--stub`): fixture data for SPY/QQQ with known ORB setups
+- **Live mode**: Alpaca historical 5-minute bars (requires `ALPACA_API_KEY`)
+- Report saved to `data/backtests/orb_*.json`
+
+### What It Proves (and Doesn't)
+
+✅ First evidence of ORB edge (or lack thereof) on historical liquid names  
+✅ Regime filter effectiveness (do `up` trades outperform `chop` trades?)  
+✅ Time-of-day sensitivity (morning breakouts vs afternoon continuations)  
+
+❌ Not walk-forward optimized (no parameter search)  
+❌ Small sample? Say so in the output  
+❌ Multi-day paper PnL still separate (next step after this)  
+
+**Non-goals:**
+- No automatic parameter optimization
+- No changing `risk.toml` or live prompts based on results
+- No fake significance theater
+- No ORB fill simulation (playbook still drives live decisions)
